@@ -1,0 +1,230 @@
+package scanner
+
+import (
+	"context"
+	"errors"
+	"io/fs"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/charlievieth/fastwalk"
+
+	"goeverything/internal/db"
+)
+
+type Indexer interface {
+	UpsertBatch(ctx context.Context, entries []db.Entry) error
+}
+
+type Runner struct {
+	Indexer Indexer
+	Workers int
+	Batch   int
+	Exclude []string
+}
+
+type Metrics struct {
+	Scanned        int64
+	Indexed        int64
+	Skipped        int64
+	Elapsed        time.Duration
+	FilesPerSecond float64
+}
+
+func DefaultWorkerCount() int {
+	w := runtime.NumCPU() * 2
+	if w < 4 {
+		return 4
+	}
+	if w > 32 {
+		return 32
+	}
+	return w
+}
+
+func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
+	start := time.Now()
+	if r.Indexer == nil {
+		return Metrics{}, errors.New("indexer is required")
+	}
+	if len(roots) == 0 {
+		return Metrics{}, errors.New("at least one root is required")
+	}
+
+	workers := r.Workers
+	if workers <= 0 {
+		workers = DefaultWorkerCount()
+	}
+	batchSize := r.Batch
+	if batchSize <= 0 {
+		batchSize = 2000
+	}
+
+	entriesCh := make(chan db.Entry, batchSize*2)
+	errCh := make(chan error, 1)
+
+	var (
+		scanned int64
+		indexed int64
+		skipped int64
+	)
+
+	// Single writer goroutine: avoids concurrent SQLite writes (SQLITE_BUSY)
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		batch := make([]db.Entry, 0, batchSize)
+		flush := func() error {
+			if len(batch) == 0 {
+				return nil
+			}
+			if err := r.Indexer.UpsertBatch(ctx, batch); err != nil {
+				return err
+			}
+			atomic.AddInt64(&indexed, int64(len(batch)))
+			batch = batch[:0]
+			return nil
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case entry, ok := <-entriesCh:
+				if !ok {
+					if err := flush(); err != nil {
+						sendErr(errCh, err)
+					}
+					return
+				}
+				batch = append(batch, entry)
+				if len(batch) >= batchSize {
+					if err := flush(); err != nil {
+						sendErr(errCh, err)
+						return
+					}
+				}
+			}
+		}
+	}()
+
+	for _, root := range roots {
+		root := root
+		exclude := newExcludeMatcher(root, r.Exclude)
+		err := fastwalk.Walk(&fastwalk.Config{Follow: false, NumWorkers: workers}, root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				atomic.AddInt64(&skipped, 1)
+				return nil
+			}
+
+			if exclude(path, d.IsDir()) {
+				if d.IsDir() {
+					return fastwalk.SkipDir
+				}
+				atomic.AddInt64(&skipped, 1)
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			info, infoErr := d.Info()
+			if infoErr != nil {
+				atomic.AddInt64(&skipped, 1)
+				return nil
+			}
+
+			atomic.AddInt64(&scanned, 1)
+			entry := db.NewEntryFromPath(root, path, info.Size(), info.ModTime(), d.IsDir())
+
+			select {
+			case entriesCh <- entry:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		})
+		if err != nil && !errors.Is(err, context.Canceled) {
+			close(entriesCh)
+			<-writerDone
+			return Metrics{}, err
+		}
+	}
+
+	close(entriesCh)
+	<-writerDone
+
+	select {
+	case err := <-errCh:
+		return Metrics{}, err
+	default:
+	}
+
+	elapsed := time.Since(start)
+	metrics := Metrics{
+		Scanned: atomic.LoadInt64(&scanned),
+		Indexed: atomic.LoadInt64(&indexed),
+		Skipped: atomic.LoadInt64(&skipped),
+		Elapsed: elapsed,
+	}
+	if elapsed > 0 {
+		metrics.FilesPerSecond = float64(metrics.Scanned) / elapsed.Seconds()
+	}
+
+	return metrics, nil
+}
+
+func sendErr(errCh chan error, err error) {
+	select {
+	case errCh <- err:
+	default:
+	}
+}
+
+func newExcludeMatcher(root string, patterns []string) func(path string, isDir bool) bool {
+	normalized := make([]string, 0, len(patterns))
+	for _, pattern := range patterns {
+		trimmed := strings.TrimSpace(pattern)
+		if trimmed == "" {
+			continue
+		}
+		normalized = append(normalized, filepath.Clean(trimmed))
+	}
+
+	root = filepath.Clean(root)
+
+	return func(path string, _ bool) bool {
+		path = filepath.Clean(path)
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return false
+		}
+		rel = filepath.Clean(rel)
+
+		for _, pattern := range normalized {
+			if strings.Contains(pattern, string(filepath.Separator)) {
+				if strings.HasSuffix(pattern, string(filepath.Separator)+"*") {
+					prefix := strings.TrimSuffix(pattern, string(filepath.Separator)+"*")
+					if rel == prefix || strings.HasPrefix(rel, prefix+string(filepath.Separator)) {
+						return true
+					}
+				}
+				if ok, _ := filepath.Match(pattern, rel); ok {
+					return true
+				}
+				continue
+			}
+
+			if filepath.Base(path) == pattern {
+				return true
+			}
+		}
+
+		return false
+	}
+}
