@@ -1,14 +1,20 @@
 package app
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
+	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 
+	"goeverything/internal/config"
 	"goeverything/internal/db"
 	"goeverything/internal/scanner"
+	"goeverything/internal/tui"
 	"goeverything/internal/watcher"
 )
 
@@ -22,17 +28,36 @@ type options struct {
 	Batch   int
 	Workers int
 	Exclude []string
+
+	SearchFormat string
+	SearchExt    string
+	SearchRoot   string
+	OnlyFiles    bool
+	OnlyDirs     bool
 }
 
 func NewRootCommand() *cobra.Command {
 	opt := options{}
+	cfg := config.Config{}
 
 	cmd := &cobra.Command{
-		Use:   "goeverything",
+		Use:   "ge",
 		Short: "Fast local file index/search for macOS",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return tui.Run(cmd.Context(), cfg)
+		},
 		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
+			loaded, err := config.Load()
+			if err == nil {
+				cfg = loaded
+			}
+
 			if opt.DBPath == "" {
-				opt.DBPath = filepath.Join(".", "goeverything.db")
+				if cfg.DBPath != "" {
+					opt.DBPath = cfg.DBPath
+				} else {
+					opt.DBPath = filepath.Join(".", "goeverything.db")
+				}
 			}
 			if opt.Batch <= 0 {
 				opt.Batch = 2000
@@ -41,15 +66,27 @@ func NewRootCommand() *cobra.Command {
 				opt.Workers = scanner.DefaultWorkerCount()
 			}
 			if len(opt.Exclude) == 0 {
-				opt.Exclude = scanner.DefaultExcludes()
+				opt.Exclude = cfg.Excludes
+				if len(opt.Exclude) == 0 {
+					opt.Exclude = scanner.DefaultExcludes()
+				}
 			}
+			if err := os.MkdirAll(filepath.Dir(opt.DBPath), 0o755); err != nil {
+				opt.DBPath = filepath.Join(".", "goeverything.db")
+				if err2 := os.MkdirAll(filepath.Dir(opt.DBPath), 0o755); err2 != nil {
+					return err2
+				}
+			}
+			cfg.DBPath = opt.DBPath
+			cfg.Excludes = opt.Exclude
 			return nil
 		},
 	}
 
 	cmd.PersistentFlags().StringVar(&opt.DBPath, "db", "", "Path to SQLite database")
 
-	cmd.AddCommand(newScanCommand(&opt))
+	cmd.AddCommand(newScanCommand(&opt, &cfg))
+	cmd.AddCommand(newReindexCommand(&opt))
 	cmd.AddCommand(newSearchCommand(&opt))
 	cmd.AddCommand(newWatchCommand(&opt))
 	cmd.AddCommand(newRootsCommand())
@@ -57,7 +94,7 @@ func NewRootCommand() *cobra.Command {
 	return cmd
 }
 
-func newScanCommand(opt *options) *cobra.Command {
+func newScanCommand(opt *options, cfg *config.Config) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "scan",
 		Short: "Scan filesystem roots and update index",
@@ -72,7 +109,11 @@ func newScanCommand(opt *options) *cobra.Command {
 			if opt.Roots {
 				roots = scanner.DiscoverRoots()
 			} else if strings.TrimSpace(opt.Root) == "" {
-				roots = []string{"/"}
+				if len(cfg.Roots) > 0 {
+					roots = cfg.Roots
+				} else {
+					roots = []string{"/"}
+				}
 			}
 
 			r := scanner.Runner{
@@ -83,7 +124,7 @@ func newScanCommand(opt *options) *cobra.Command {
 			}
 			metrics, err := r.Scan(cmd.Context(), roots)
 			if err != nil {
-				return err
+				return watcher.WithPermissionHint(err)
 			}
 
 			fmt.Printf("scanned=%d indexed=%d skipped=%d elapsed=%s files_per_sec=%.2f\n",
@@ -96,12 +137,36 @@ func newScanCommand(opt *options) *cobra.Command {
 			return nil
 		},
 	}
-	command.Flags().StringVar(&opt.Root, "root", "/", "Filesystem root to scan")
+	command.Flags().StringVar(&opt.Root, "root", "", "Filesystem root to scan (default: roots from config)")
 	command.Flags().BoolVar(&opt.Roots, "all-roots", false, "Scan default roots (/, /Volumes/*)")
 	command.Flags().IntVar(&opt.Workers, "workers", scanner.DefaultWorkerCount(), "Concurrent index workers")
 	command.Flags().IntVar(&opt.Batch, "batch", 2000, "Batch size for DB upserts")
-	command.Flags().StringSliceVar(&opt.Exclude, "exclude", scanner.DefaultExcludes(), "Exclude patterns (name or relative glob)")
+	command.Flags().StringSliceVar(&opt.Exclude, "exclude", nil, "Exclude patterns (name or relative glob)")
 	return command
+}
+
+func newReindexCommand(opt *options) *cobra.Command {
+	return &cobra.Command{
+		Use:   "reindex",
+		Short: "Rebuild the FTS index without rescanning the filesystem",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			store, err := db.Open(cmd.Context(), opt.DBPath)
+			if err != nil {
+				return err
+			}
+			defer store.Close()
+
+			if err := store.ReindexFTS(cmd.Context()); err != nil {
+				return err
+			}
+			total, err := store.Count(cmd.Context())
+			if err != nil {
+				return err
+			}
+			fmt.Printf("fts_reindexed entries=%d\n", total)
+			return nil
+		},
+	}
 }
 
 func newSearchCommand(opt *options) *cobra.Command {
@@ -115,21 +180,41 @@ func newSearchCommand(opt *options) *cobra.Command {
 			}
 			defer store.Close()
 
-			results, err := store.Search(cmd.Context(), opt.Query, opt.Limit, opt.Offset)
+			searchOpts := db.SearchOptions{
+				Query:     opt.Query,
+				Limit:     opt.Limit,
+				Offset:    opt.Offset,
+				OnlyDirs:  opt.OnlyDirs,
+				OnlyFiles: opt.OnlyFiles,
+				Ext:       opt.SearchExt,
+				Root:      opt.SearchRoot,
+			}
+
+			results, err := store.SearchAdvanced(cmd.Context(), searchOpts)
 			if err != nil {
 				return err
 			}
 
-			for _, entry := range results {
-				fmt.Printf("%s\t%s\t%d\n", entry.Name, entry.Path, entry.Size)
+			switch strings.ToLower(strings.TrimSpace(opt.SearchFormat)) {
+			case "", "table":
+				writeTable(os.Stdout, results)
+				return nil
+			case "json":
+				return writeJSON(os.Stdout, results)
+			default:
+				return fmt.Errorf("unsupported format %q (allowed: table,json)", opt.SearchFormat)
 			}
-			return nil
 		},
 	}
 
 	command.Flags().StringVarP(&opt.Query, "query", "q", "", "Search query")
 	command.Flags().IntVar(&opt.Limit, "limit", 50, "Maximum results")
 	command.Flags().IntVar(&opt.Offset, "offset", 0, "Result offset")
+	command.Flags().StringVar(&opt.SearchFormat, "format", "table", "Output format: table|json")
+	command.Flags().StringVar(&opt.SearchExt, "ext", "", "Filter by extension (example: go or .go)")
+	command.Flags().StringVar(&opt.SearchRoot, "root", "", "Filter results by indexed root")
+	command.Flags().BoolVar(&opt.OnlyFiles, "only-files", false, "Return only files")
+	command.Flags().BoolVar(&opt.OnlyDirs, "only-dirs", false, "Return only directories")
 	_ = command.MarkFlagRequired("query")
 	return command
 }
@@ -151,10 +236,22 @@ func newWatchCommand(opt *options) *cobra.Command {
 			}
 
 			w := watcher.New(store)
-			return w.Run(cmd.Context(), root)
+			if err := w.Run(cmd.Context(), root); err != nil {
+				return watcher.WithPermissionHint(err)
+			}
+			return nil
 		},
 	}
 	command.Flags().StringVar(&opt.Root, "root", "/", "Filesystem root to watch")
+
+	command.AddCommand(newWatchInstallCommand(opt))
+	command.AddCommand(newWatchUninstallCommand())
+	command.AddCommand(newWatchStartCommand())
+	command.AddCommand(newWatchStopCommand())
+	command.AddCommand(newWatchRestartCommand())
+	command.AddCommand(newWatchStatusCommand())
+	command.AddCommand(newWatchLogsCommand())
+
 	return command
 }
 
@@ -169,4 +266,23 @@ func newRootsCommand() *cobra.Command {
 		},
 	}
 	return command
+}
+
+func writeJSON(w io.Writer, entries []db.Entry) error {
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ")
+	return enc.Encode(entries)
+}
+
+func writeTable(dst io.Writer, entries []db.Entry) {
+	w := tabwriter.NewWriter(dst, 0, 4, 2, ' ', 0)
+	_, _ = fmt.Fprintln(w, "NAME\tPATH\tSIZE\tEXT\tTYPE")
+	for _, entry := range entries {
+		kind := "file"
+		if entry.IsDir {
+			kind = "dir"
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%s\t%d\t%s\t%s\n", entry.Name, entry.Path, entry.Size, entry.Ext, kind)
+	}
+	_ = w.Flush()
 }

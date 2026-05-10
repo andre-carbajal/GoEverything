@@ -87,13 +87,7 @@ func (s *Store) setup(ctx context.Context) error {
 		`CREATE INDEX IF NOT EXISTS idx_entries_root ON entries(root);`,
 		`CREATE INDEX IF NOT EXISTS idx_entries_name ON entries(name);`,
 		`CREATE INDEX IF NOT EXISTS idx_entries_ext ON entries(ext);`,
-		`CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
-			name,
-			path,
-			content='entries',
-			content_rowid='id',
-			tokenize='unicode61 remove_diacritics 2'
-		);`,
+		ftsSchemaStmt(),
 		`CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
 			INSERT INTO entries_fts(rowid, name, path) VALUES (new.id, new.name, new.path);
 		END;`,
@@ -236,7 +230,8 @@ func (s *Store) SearchAdvanced(ctx context.Context, opts SearchOptions) ([]Entry
 				WHEN e.name LIKE ? THEN 1
 				ELSE 2
 			END,
-			e.name ASC
+			e.name ASC,
+			e.path ASC
 		LIMIT ? OFFSET ?`
 	args = append(args, query, query+"%", opts.Limit, opts.Offset)
 
@@ -261,7 +256,7 @@ func (s *Store) searchByLike(ctx context.Context, query string, opts SearchOptio
 		WHERE (e.name LIKE ? OR e.path LIKE ?)`
 	args := []any{like, like}
 	q, args = applySearchFilters(q, args, opts)
-	q += ` ORDER BY e.name ASC LIMIT ? OFFSET ?`
+	q += ` ORDER BY e.name ASC, e.path ASC LIMIT ? OFFSET ?`
 	args = append(args, opts.Limit, opts.Offset)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -319,6 +314,39 @@ func NewEntryFromPath(root, path string, size int64, mtime time.Time, isDir bool
 		ext = strings.ToLower(strings.TrimPrefix(filepath.Ext(base), "."))
 	}
 	return Entry{Name: base, Path: path, Ext: ext, Size: size, MTime: mtime.Unix(), IsDir: isDir, Root: root}
+}
+
+func (s *Store) ReindexFTS(ctx context.Context) error {
+	schema := []string{
+		`DROP TABLE IF EXISTS entries_fts;`,
+		ftsSchemaStmt(),
+		`INSERT INTO entries_fts(rowid, name, path)
+		 SELECT id, name, path FROM entries;`,
+	}
+
+	for _, stmt := range schema {
+		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) Count(ctx context.Context) (int64, error) {
+	var total int64
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM entries`).Scan(&total)
+	return total, err
+}
+
+func ftsSchemaStmt() string {
+	return `CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
+		name,
+		path,
+		content='entries',
+		content_rowid='id',
+		tokenize='unicode61 remove_diacritics 2',
+		prefix='2 3 4'
+	);`
 }
 
 func buildFTSQuery(query string) string {

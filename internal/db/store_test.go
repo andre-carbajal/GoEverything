@@ -43,3 +43,51 @@ func TestStoreSearchFTSAndWildcard(t *testing.T) {
 		t.Fatalf("unexpected wildcard results: %+v", res)
 	}
 }
+
+func TestStoreSearchAdvancedFiltersAndReindex(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	store, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now()
+	entries := []Entry{
+		NewEntryFromPath("/Users/a", "/Users/a/report.txt", 10, now, false),
+		NewEntryFromPath("/Users/a", "/Users/a/src/main.go", 20, now, false),
+		NewEntryFromPath("/Users/a", "/Users/a/src", 0, now, true),
+	}
+	if err := store.UpsertBatch(ctx, entries); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	got, err := store.SearchAdvanced(ctx, SearchOptions{
+		Query:     "report",
+		OnlyFiles: true,
+		Ext:       ".txt",
+		Root:      "/Users/a",
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatalf("search advanced: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "report.txt" {
+		t.Fatalf("unexpected search advanced results: %+v", got)
+	}
+
+	if err := store.ReindexFTS(ctx); err != nil {
+		t.Fatalf("reindex fts: %v", err)
+	}
+	got, err = store.Search(ctx, "main", 10, 0)
+	if err != nil {
+		t.Fatalf("search after reindex: %v", err)
+	}
+	if len(got) != 1 || got[0].Name != "main.go" {
+		t.Fatalf("unexpected results after reindex: %+v", got)
+	}
+}
