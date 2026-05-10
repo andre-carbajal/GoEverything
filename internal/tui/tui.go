@@ -25,7 +25,6 @@ type viewMode int
 const (
 	viewMenu viewMode = iota
 	viewSearch
-	viewVolumes
 	viewConfig
 )
 
@@ -75,12 +74,14 @@ type model struct {
 	addRootActive   bool
 	searchListFocus bool
 
-	availableRoots []string
-	volCursor      int
-
 	cfgCursor      int
 	cfgInput       textinput.Model
 	cfgInputActive bool
+	cfgThemePicker bool
+	cfgThemeCursor int
+	cfgPathPicker  bool
+	cfgPathCursor  int
+	pathOptions    []string
 
 	theme        theme
 	themes       []string
@@ -108,8 +109,8 @@ func newModel(ctx context.Context, cfg config.Config) model {
 	searchInput.Width = 60
 
 	cfgInput := textinput.New()
-	cfgInput.Placeholder = "Add exclude (example: .git or Library/Caches/*)"
-	cfgInput.Prompt = "exclude> "
+	cfgInput.Placeholder = "Enter custom scan path (example: ~/Projects)"
+	cfgInput.Prompt = "path> "
 	cfgInput.CharLimit = 300
 	cfgInput.Width = 60
 
@@ -120,17 +121,17 @@ func newModel(ctx context.Context, cfg config.Config) model {
 	addRootInput.Width = 60
 
 	return model{
-		ctx:            ctx,
-		cfg:            cfg,
-		mode:           viewSearch,
-		menu:           []string{"Search", "Volumes", "Re-index", "Config"},
-		searchInput:    searchInput,
-		addRootInput:   addRootInput,
-		availableRoots: availableRoots(),
-		cfgInput:       cfgInput,
-		theme:          themeByName(cfg.Theme),
-		themes:         []string{"tokyonight", "catppuccin", "groovbox"},
-		status:         "ready",
+		ctx:          ctx,
+		cfg:          cfg,
+		mode:         viewSearch,
+		menu:         []string{"Search", "Re-index", "Config"},
+		searchInput:  searchInput,
+		addRootInput: addRootInput,
+		cfgInput:     cfgInput,
+		theme:        themeByName(cfg.Theme),
+		themes:       []string{"tokyonight", "catppuccin", "groovbox"},
+		pathOptions:  availablePathOptions(),
+		status:       "ready",
 	}
 }
 
@@ -234,8 +235,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateMenu(msg)
 		case viewSearch:
 			return m.updateSearch(msg)
-		case viewVolumes:
-			return m.updateVolumes(msg)
 		case viewConfig:
 			return m.updateConfig(msg)
 		}
@@ -256,9 +255,6 @@ func (m model) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = viewSearch
 			m.searchListFocus = false
 			m.searchInput.Focus()
-			return m, nil
-		case "Volumes":
-			m.mode = viewVolumes
 			return m, nil
 		case "Re-index":
 			if m.busy {
@@ -373,57 +369,49 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmd, debounceCmd(m.searchSeq, q))
 }
 
-func (m model) updateVolumes(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if len(m.availableRoots) == 0 {
-		return m, nil
-	}
-	switch msg.String() {
-	case "j", "down":
-		m.volCursor = min(len(m.availableRoots)-1, m.volCursor+1)
-	case "k", "up":
-		m.volCursor = max(0, m.volCursor-1)
-	case " ", "enter":
-		root := m.availableRoots[m.volCursor]
-		if slices.Contains(m.cfg.Roots, root) {
-			next := make([]string, 0, len(m.cfg.Roots))
-			for _, r := range m.cfg.Roots {
-				if r != root {
-					next = append(next, r)
-				}
-			}
-			m.cfg.Roots = next
-		} else {
-			m.cfg.Roots = append(m.cfg.Roots, root)
-			slices.Sort(m.cfg.Roots)
-		}
-		if len(m.cfg.Roots) == 0 {
-			m.cfg.Roots = []string{"~"}
-		}
-		if err := config.Save(m.cfg); err != nil {
-			m.err = err
-		} else {
-			m.status = "saved roots"
-		}
-	}
-	return m, nil
-}
-
 func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.cfgInputActive {
 		switch msg.String() {
 		case "enter":
 			value := strings.TrimSpace(m.cfgInput.Value())
-			if value != "" && !slices.Contains(m.cfg.Excludes, value) {
+			m.cfgInput.SetValue("")
+			m.cfgInputActive = false
+			m.cfgInput.Blur()
+			if value == "" {
+				return m, nil
+			}
+			if m.cfgCursor == 0 {
+				root, err := config.ExpandPath(value)
+				if err != nil {
+					m.err = err
+					return m, nil
+				}
+				info, statErr := os.Stat(root)
+				if statErr != nil || !info.IsDir() {
+					if statErr != nil {
+						m.err = statErr
+					} else {
+						m.err = fmt.Errorf("%s is not a directory", root)
+					}
+					return m, nil
+				}
+				m.cfg.DefaultScanPath = value
+				if err := config.Save(m.cfg); err != nil {
+					m.err = err
+				} else {
+					m.status = "saved scan location"
+				}
+				return m, nil
+			}
+			if !slices.Contains(m.cfg.Excludes, value) {
 				m.cfg.Excludes = append(m.cfg.Excludes, value)
 				slices.Sort(m.cfg.Excludes)
 				if err := config.Save(m.cfg); err != nil {
 					m.err = err
+				} else {
+					m.status = "exclude added"
 				}
-				m.status = "exclude added"
 			}
-			m.cfgInput.SetValue("")
-			m.cfgInputActive = false
-			m.cfgInput.Blur()
 			return m, nil
 		case "esc":
 			m.cfgInputActive = false
@@ -436,6 +424,56 @@ func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	}
 
+	if m.cfgThemePicker {
+		switch msg.String() {
+		case "j", "down":
+			m.cfgThemeCursor = min(len(m.themes)-1, m.cfgThemeCursor+1)
+		case "k", "up":
+			m.cfgThemeCursor = max(0, m.cfgThemeCursor-1)
+		case "enter":
+			m.cfg.Theme = m.themes[m.cfgThemeCursor]
+			m.theme = themeByName(m.cfg.Theme)
+			m.cfgThemePicker = false
+			if err := config.Save(m.cfg); err != nil {
+				m.err = err
+			} else {
+				m.status = "theme updated"
+			}
+		case "esc":
+			m.cfgThemePicker = false
+		}
+		return m, nil
+	}
+
+	if m.cfgPathPicker {
+		switch msg.String() {
+		case "j", "down":
+			m.cfgPathCursor = min(len(m.pathOptions)-1, m.cfgPathCursor+1)
+		case "k", "up":
+			m.cfgPathCursor = max(0, m.cfgPathCursor-1)
+		case "enter":
+			choice := m.pathOptions[m.cfgPathCursor]
+			if choice == "__custom__" {
+				m.cfgPathPicker = false
+				m.cfgInputActive = true
+				m.cfgInput.SetValue("")
+				m.cfgInput.Placeholder = "Custom scan path (example: ~/Projects)"
+				m.cfgInput.Prompt = "scan-path> "
+				return m, m.cfgInput.Focus()
+			}
+			m.cfg.DefaultScanPath = choice
+			m.cfgPathPicker = false
+			if err := config.Save(m.cfg); err != nil {
+				m.err = err
+			} else {
+				m.status = "saved scan location"
+			}
+		case "esc":
+			m.cfgPathPicker = false
+		}
+		return m, nil
+	}
+
 	maxCursor := 2 + len(m.cfg.Excludes)
 	switch msg.String() {
 	case "j", "down":
@@ -444,7 +482,29 @@ func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cfgCursor = max(0, m.cfgCursor-1)
 	case "a":
 		m.cfgInputActive = true
+		m.cfgInput.Placeholder = "Add exclude (example: .git or Library/Caches/*)"
+		m.cfgInput.Prompt = "exclude> "
 		return m, m.cfgInput.Focus()
+	case "enter":
+		switch m.cfgCursor {
+		case 0:
+			m.cfgPathPicker = true
+			m.cfgPathCursor = 0
+		case 1:
+			m.cfg.AutoScanOnStart = !m.cfg.AutoScanOnStart
+			if err := config.Save(m.cfg); err != nil {
+				m.err = err
+			} else {
+				m.status = "auto-scan updated"
+			}
+		case 2:
+			m.cfgThemePicker = true
+			idx := slices.Index(m.themes, m.cfg.Theme)
+			if idx < 0 {
+				idx = 0
+			}
+			m.cfgThemeCursor = idx
+		}
 	case "d":
 		exIdx := m.cfgCursor - 3
 		if exIdx < 0 || exIdx >= len(m.cfg.Excludes) {
@@ -460,40 +520,6 @@ func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = "exclude removed"
 		}
-	case "t":
-		if m.cfgCursor == 2 {
-			idx := slices.Index(m.themes, m.cfg.Theme)
-			idx = (idx + 1) % len(m.themes)
-			m.cfg.Theme = m.themes[idx]
-			m.theme = themeByName(m.cfg.Theme)
-			if err := config.Save(m.cfg); err != nil {
-				m.err = err
-			} else {
-				m.status = "theme updated"
-			}
-		}
-	case "m":
-		if m.cfgCursor == 0 {
-			if m.cfg.DefaultScanMode == config.ScanModeHome {
-				m.cfg.DefaultScanMode = config.ScanModeConfigured
-			} else {
-				m.cfg.DefaultScanMode = config.ScanModeHome
-			}
-			if err := config.Save(m.cfg); err != nil {
-				m.err = err
-			} else {
-				m.status = "scan mode updated"
-			}
-		}
-	case "s":
-		if m.cfgCursor == 1 {
-			m.cfg.AutoScanOnStart = !m.cfg.AutoScanOnStart
-			if err := config.Save(m.cfg); err != nil {
-				m.err = err
-			} else {
-				m.status = "auto-scan updated"
-			}
-		}
 	}
 	return m, nil
 }
@@ -507,8 +533,6 @@ func (m model) View() string {
 		b.WriteString(m.viewMenu())
 	case viewSearch:
 		b.WriteString(m.viewSearch())
-	case viewVolumes:
-		b.WriteString(m.viewVolumes())
 	case viewConfig:
 		b.WriteString(m.viewConfig())
 	}
@@ -539,8 +563,8 @@ func (m model) viewHeader() string {
 		"                                                                 ░░██████                                        ░░██████ ",
 		"                                                                  ░░░░░░                                          ░░░░░░  ",
 	}
-	line := fmt.Sprintf(" indexed=%d  roots=%d  last_scan=%d files in %s  theme=%s",
-		m.totalIndexed, len(m.cfg.Roots), m.lastMetrics.Indexed, m.lastMetrics.Elapsed, m.cfg.Theme)
+	line := fmt.Sprintf(" indexed=%d  scan_path=%s  last_scan=%d files in %s  theme=%s",
+		m.totalIndexed, m.cfg.DefaultScanPath, m.lastMetrics.Indexed, m.lastMetrics.Elapsed, m.cfg.Theme)
 	return m.theme.Header.Render(strings.Join(ascii, "\n")) + "\n" + m.theme.Highlight.Render(line)
 }
 
@@ -609,41 +633,52 @@ func (m model) viewSearch() string {
 	return strings.Join(lines, "\n")
 }
 
-func (m model) viewVolumes() string {
-	var lines []string
-	lines = append(lines, m.theme.Title.Render("Volumes (toggle with enter/space)"))
-	for i, root := range m.availableRoots {
-		on := slices.Contains(m.cfg.Roots, root)
-		check := "[ ]"
-		if on {
-			check = "[x]"
-		}
-		prefix := "  "
-		style := m.theme.Text
-		if i == m.volCursor {
-			prefix = "➜ "
-			style = m.theme.Highlight
-		}
-		lines = append(lines, style.Render(fmt.Sprintf("%s%s %s", prefix, check, root)))
-	}
-	return strings.Join(lines, "\n")
-}
-
 func (m model) viewConfig() string {
 	var lines []string
 	lines = append(lines, m.theme.Title.Render("Config"))
-	prefix := func(idx int) string {
+	rowStyle := func(idx int) lipgloss.Style {
 		if m.cfgCursor == idx {
-			return "➜ "
+			return lipgloss.NewStyle().Background(lipgloss.Color("#2f3b63")).Foreground(lipgloss.Color("#ffffff")).Bold(true).Padding(0, 1)
 		}
-		return "  "
+		return lipgloss.NewStyle().Padding(0, 1).Foreground(lipgloss.Color("#c0caf5"))
 	}
-	modeLine := fmt.Sprintf("%sscan mode: %s  (press m to toggle)", prefix(0), m.cfg.DefaultScanMode)
-	autoLine := fmt.Sprintf("%sauto scan on start: %t  (press s to toggle)", prefix(1), m.cfg.AutoScanOnStart)
-	themeLine := fmt.Sprintf("%stheme: %s  (press t to toggle)", prefix(2), m.cfg.Theme)
-	lines = append(lines, m.theme.Highlight.Render(modeLine))
-	lines = append(lines, m.theme.Highlight.Render(autoLine))
-	lines = append(lines, m.theme.Highlight.Render(themeLine))
+	autoYes := "No"
+	if m.cfg.AutoScanOnStart {
+		autoYes = "Yes"
+	}
+	lines = append(lines, rowStyle(0).Render("Scan Location: "+m.cfg.DefaultScanPath+"  (Enter to change)"))
+	lines = append(lines, rowStyle(1).Render("Auto Scan on Start: "+autoYes+"  (Enter to toggle)"))
+	lines = append(lines, rowStyle(2).Render("Theme: "+m.cfg.Theme+"  (Enter to select)"))
+	if m.cfgPathPicker {
+		lines = append(lines, "")
+		lines = append(lines, m.theme.Title.Render("Select scan location (Enter to confirm, Esc to cancel)"))
+		for i, p := range m.pathOptions {
+			style := m.theme.Text
+			prefix := "  "
+			label := p
+			if p == "__custom__" {
+				label = "Custom path..."
+			}
+			if i == m.cfgPathCursor {
+				prefix = "➜ "
+				style = lipgloss.NewStyle().Background(lipgloss.Color("#2f3b63")).Foreground(lipgloss.Color("#ffffff")).Bold(true)
+			}
+			lines = append(lines, style.Render(prefix+label))
+		}
+	}
+	if m.cfgThemePicker {
+		lines = append(lines, "")
+		lines = append(lines, m.theme.Title.Render("Select theme (Enter to confirm, Esc to cancel)"))
+		for i, th := range m.themes {
+			style := m.theme.Text
+			prefix := "  "
+			if i == m.cfgThemeCursor {
+				prefix = "➜ "
+				style = lipgloss.NewStyle().Background(lipgloss.Color("#2f3b63")).Foreground(lipgloss.Color("#ffffff")).Bold(true)
+			}
+			lines = append(lines, style.Render(prefix+th))
+		}
+	}
 	lines = append(lines, "")
 	lines = append(lines, m.theme.Title.Render("excludes (a=add, d=remove):"))
 	if len(m.cfg.Excludes) == 0 {
@@ -755,13 +790,7 @@ func openCmd(path string, reveal bool) tea.Cmd {
 }
 
 func (m model) searchScopeLabel() string {
-	base := make([]string, 0, len(m.cfg.Roots))
-	for _, root := range m.cfg.Roots {
-		base = append(base, root)
-	}
-	if len(base) == 0 {
-		base = append(base, "~")
-	}
+	base := []string{m.cfg.DefaultScanPath}
 	if len(m.tempRoots) == 0 {
 		return strings.Join(base, ", ")
 	}
@@ -769,22 +798,22 @@ func (m model) searchScopeLabel() string {
 }
 
 func defaultScanRoots(cfg config.Config) ([]string, error) {
-	if cfg.DefaultScanMode == config.ScanModeConfigured {
-		return config.ResolveRoots(cfg.Roots)
-	}
-	home, err := config.ExpandPath("~")
+	root, err := config.ExpandPath(cfg.DefaultScanPath)
 	if err != nil {
 		return nil, err
 	}
-	return []string{home}, nil
+	return []string{root}, nil
 }
 
-func availableRoots() []string {
-	roots := scanner.DiscoverRoots()
-	if !slices.Contains(roots, "~") {
-		return append([]string{"~"}, roots...)
+func availablePathOptions() []string {
+	opts := []string{"~", "__custom__"}
+	for _, root := range scanner.DiscoverRoots() {
+		if root == "/" || root == "~" {
+			continue
+		}
+		opts = append(opts, root)
 	}
-	return roots
+	return opts
 }
 
 type theme struct {

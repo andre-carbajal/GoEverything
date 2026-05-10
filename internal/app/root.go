@@ -112,15 +112,15 @@ func newScanCommand(opt *options, cfg *config.Config) *cobra.Command {
 			if opt.Roots {
 				roots = scanner.DiscoverRoots()
 			} else if strings.TrimSpace(opt.Root) == "" {
-				if len(cfg.Roots) > 0 {
-					roots = cfg.Roots
-				} else {
-					roots = []string{"~"}
-				}
+				roots = []string{cfg.DefaultScanPath}
 			}
-			resolvedRoots, err := config.ResolveRoots(roots)
-			if err != nil {
-				return err
+			resolvedRoots := make([]string, 0, len(roots))
+			for _, root := range roots {
+				resolved, resolveErr := config.ExpandPath(root)
+				if resolveErr != nil {
+					return resolveErr
+				}
+				resolvedRoots = append(resolvedRoots, resolved)
 			}
 
 			r := scanner.Runner{

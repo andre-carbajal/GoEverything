@@ -14,10 +14,11 @@ func TestMenuEnterNavigatesToSearch(t *testing.T) {
 	t.Parallel()
 
 	m := newModel(context.Background(), config.Config{
-		DBPath:   "/tmp/test.db",
-		Roots:    []string{"/"},
-		Excludes: []string{".git"},
-		Theme:    "tokyonight",
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+		AutoScanOnStart: true,
 	})
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
@@ -32,10 +33,9 @@ func TestNewModelStartsInSearch(t *testing.T) {
 
 	m := newModel(context.Background(), config.Config{
 		DBPath:          "/tmp/test.db",
-		Roots:           []string{"~"},
+		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		DefaultScanMode: config.ScanModeHome,
 		AutoScanOnStart: true,
 	})
 	if m.mode != viewSearch {
@@ -47,12 +47,13 @@ func TestSlashFocusesSearch(t *testing.T) {
 	t.Parallel()
 
 	m := newModel(context.Background(), config.Config{
-		DBPath:   "/tmp/test.db",
-		Roots:    []string{"/"},
-		Excludes: []string{".git"},
-		Theme:    "tokyonight",
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+		AutoScanOnStart: true,
 	})
-	m.mode = viewVolumes
+	m.mode = viewMenu
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	next := updated.(model)
@@ -66,10 +67,9 @@ func TestCtrlAOpensTempRootInput(t *testing.T) {
 
 	m := newModel(context.Background(), config.Config{
 		DBPath:          "/tmp/test.db",
-		Roots:           []string{"~"},
+		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		DefaultScanMode: config.ScanModeHome,
 		AutoScanOnStart: true,
 	})
 
@@ -85,10 +85,9 @@ func TestSearchInputAllowsTypingJKWhenInputFocused(t *testing.T) {
 
 	m := newModel(context.Background(), config.Config{
 		DBPath:          "/tmp/test.db",
-		Roots:           []string{"~"},
+		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		DefaultScanMode: config.ScanModeHome,
 		AutoScanOnStart: true,
 	})
 	m.searchRes = []db.Entry{{Name: "a", Path: "/tmp/a"}}
@@ -105,10 +104,9 @@ func TestSearchListFocusUsesJKForNavigation(t *testing.T) {
 
 	m := newModel(context.Background(), config.Config{
 		DBPath:          "/tmp/test.db",
-		Roots:           []string{"~"},
+		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		DefaultScanMode: config.ScanModeHome,
 		AutoScanOnStart: true,
 	})
 	m.searchRes = []db.Entry{

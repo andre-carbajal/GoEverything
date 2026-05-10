@@ -12,13 +12,19 @@ import (
 )
 
 const (
-	defaultTheme       = "tokyonight"
-	ScanModeHome       = "home"
-	ScanModeConfigured = "configured_roots"
-	homeToken          = "~"
+	defaultTheme = "tokyonight"
+	homeToken    = "~"
 )
 
 type Config struct {
+	DBPath          string   `json:"db_path"`
+	DefaultScanPath string   `json:"default_scan_path"`
+	Excludes        []string `json:"excludes"`
+	Theme           string   `json:"theme"`
+	AutoScanOnStart bool     `json:"auto_scan_on_start"`
+}
+
+type legacyConfig struct {
 	DBPath          string   `json:"db_path"`
 	Roots           []string `json:"roots"`
 	Excludes        []string `json:"excludes"`
@@ -47,13 +53,21 @@ func Load() (Config, error) {
 		}
 		return Config{}, err
 	}
-
 	if len(data) == 0 {
+		if saveErr := Save(cfg); saveErr != nil {
+			return Config{}, saveErr
+		}
 		return cfg, nil
 	}
+
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return Config{}, err
+		var old legacyConfig
+		if err2 := json.Unmarshal(data, &old); err2 != nil {
+			return Config{}, err
+		}
+		cfg = fromLegacy(old)
 	}
+
 	cfg.normalize()
 	if err := Save(cfg); err != nil {
 		return Config{}, err
@@ -97,10 +111,9 @@ func defaults() Config {
 	dbPath, _ := defaultDBPath()
 	return Config{
 		DBPath:          dbPath,
-		Roots:           []string{homeToken},
+		DefaultScanPath: homeToken,
 		Excludes:        scanner.DefaultExcludes(),
 		Theme:           defaultTheme,
-		DefaultScanMode: ScanModeHome,
 		AutoScanOnStart: true,
 	}
 }
@@ -113,6 +126,24 @@ func defaultDBPath() (string, error) {
 	return filepath.Join(dir, "goeverything.db"), nil
 }
 
+func fromLegacy(old legacyConfig) Config {
+	cfg := Config{
+		DBPath:          old.DBPath,
+		Excludes:        old.Excludes,
+		Theme:           old.Theme,
+		AutoScanOnStart: old.AutoScanOnStart,
+		DefaultScanPath: homeToken,
+	}
+	if len(old.Roots) > 0 {
+		cfg.DefaultScanPath = old.Roots[0]
+	}
+	mode := strings.ToLower(strings.TrimSpace(old.DefaultScanMode))
+	if mode == "home" {
+		cfg.DefaultScanPath = homeToken
+	}
+	return cfg
+}
+
 func (c *Config) normalize() {
 	if c.DBPath == "" {
 		dbPath, err := defaultDBPath()
@@ -120,18 +151,14 @@ func (c *Config) normalize() {
 			c.DBPath = dbPath
 		}
 	}
-	if len(c.Roots) == 0 {
-		c.Roots = []string{homeToken}
+	if strings.TrimSpace(c.DefaultScanPath) == "" {
+		c.DefaultScanPath = homeToken
 	}
 	if len(c.Excludes) == 0 {
 		c.Excludes = scanner.DefaultExcludes()
 	}
 	if c.Theme == "" {
 		c.Theme = defaultTheme
-	}
-	mode := strings.ToLower(strings.TrimSpace(c.DefaultScanMode))
-	if mode != ScanModeHome && mode != ScanModeConfigured {
-		c.DefaultScanMode = ScanModeHome
 	}
 }
 
@@ -140,7 +167,6 @@ func ExpandPath(path string) (string, error) {
 	if p == "" {
 		return "", errors.New("path is required")
 	}
-
 	if p == homeToken || strings.HasPrefix(p, homeToken+"/") {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -152,19 +178,4 @@ func ExpandPath(path string) (string, error) {
 		p = filepath.Join(home, strings.TrimPrefix(p, homeToken+"/"))
 	}
 	return filepath.Clean(p), nil
-}
-
-func ResolveRoots(roots []string) ([]string, error) {
-	if len(roots) == 0 {
-		roots = []string{homeToken}
-	}
-	out := make([]string, 0, len(roots))
-	for _, root := range roots {
-		expanded, err := ExpandPath(root)
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, expanded)
-	}
-	return out, nil
 }

@@ -30,6 +30,11 @@ go run ./cmd/ge watch start
 
 - Config file: `~/.config/ge/config.json`
 - Default DB path: `~/.config/ge/goeverything.db`
+- Key config fields:
+  - `default_scan_path` (single default scan location, e.g. `~` or `/Volumes/SSD`)
+  - `auto_scan_on_start` (`true`/`false`)
+  - `theme` (`tokyonight`, `catppuccin`, `groovbox`)
+  - `excludes` (list of ignore patterns)
 
 ## Scan Tuning
 

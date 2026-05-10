@@ -28,14 +28,11 @@ func TestLoadCreatesDefaultConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if cfg.DefaultScanMode != ScanModeHome {
-		t.Fatalf("unexpected default scan mode: %s", cfg.DefaultScanMode)
-	}
 	if !cfg.AutoScanOnStart {
 		t.Fatalf("expected auto scan on start=true")
 	}
-	if len(cfg.Roots) != 1 || cfg.Roots[0] != "~" {
-		t.Fatalf("unexpected default roots: %+v", cfg.Roots)
+	if cfg.DefaultScanPath != "~" {
+		t.Fatalf("unexpected default scan path: %s", cfg.DefaultScanPath)
 	}
 
 	path, err := Path()
