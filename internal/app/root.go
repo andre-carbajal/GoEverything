@@ -48,15 +48,21 @@ func NewRootCommand() *cobra.Command {
 		},
 		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
 			loaded, err := config.Load()
-			if err == nil {
-				cfg = loaded
+			if err != nil {
+				cfgPath, _ := config.Path()
+				return fmt.Errorf("cannot load config at %q: %w\nhint: ensure %s is writable", cfgPath, err, filepath.Dir(cfgPath))
 			}
+			cfg = loaded
 
 			if opt.DBPath == "" {
 				if cfg.DBPath != "" {
 					opt.DBPath = cfg.DBPath
 				} else {
-					opt.DBPath = filepath.Join(".", "goeverything.db")
+					dbPath, dbErr := config.ExpandPath("~/.config/ge/goeverything.db")
+					if dbErr != nil {
+						return dbErr
+					}
+					opt.DBPath = dbPath
 				}
 			}
 			if opt.Batch <= 0 {
@@ -72,10 +78,7 @@ func NewRootCommand() *cobra.Command {
 				}
 			}
 			if err := os.MkdirAll(filepath.Dir(opt.DBPath), 0o755); err != nil {
-				opt.DBPath = filepath.Join(".", "goeverything.db")
-				if err2 := os.MkdirAll(filepath.Dir(opt.DBPath), 0o755); err2 != nil {
-					return err2
-				}
+				return fmt.Errorf("cannot create db dir %q: %w\nhint: ensure ~/.config/ge is writable or pass --db", filepath.Dir(opt.DBPath), err)
 			}
 			cfg.DBPath = opt.DBPath
 			cfg.Excludes = opt.Exclude
@@ -112,8 +115,12 @@ func newScanCommand(opt *options, cfg *config.Config) *cobra.Command {
 				if len(cfg.Roots) > 0 {
 					roots = cfg.Roots
 				} else {
-					roots = []string{"/"}
+					roots = []string{"~"}
 				}
+			}
+			resolvedRoots, err := config.ResolveRoots(roots)
+			if err != nil {
+				return err
 			}
 
 			r := scanner.Runner{
@@ -122,7 +129,7 @@ func newScanCommand(opt *options, cfg *config.Config) *cobra.Command {
 				Batch:   opt.Batch,
 				Exclude: opt.Exclude,
 			}
-			metrics, err := r.Scan(cmd.Context(), roots)
+			metrics, err := r.Scan(cmd.Context(), resolvedRoots)
 			if err != nil {
 				return watcher.WithPermissionHint(err)
 			}

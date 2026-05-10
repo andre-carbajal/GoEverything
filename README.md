@@ -26,6 +26,11 @@ go run ./cmd/ge watch install --root /Users
 go run ./cmd/ge watch start
 ```
 
+## Config & DB Paths
+
+- Config file: `~/.config/ge/config.json`
+- Default DB path: `~/.config/ge/goeverything.db`
+
 ## Scan Tuning
 
 - `--workers`: concurrent index workers (default: auto)
@@ -36,7 +41,7 @@ go run ./cmd/ge watch start
 Example:
 
 ```bash
-go run ./cmd/cli scan \
+go run ./cmd/ge scan \
   --all-roots \
   --workers 16 \
   --batch 3000 \
