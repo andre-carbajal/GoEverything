@@ -5,10 +5,13 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"log"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/uptrace/bun"
+	"github.com/uptrace/bun/dialect/sqlitedialect"
 	_ "modernc.org/sqlite"
 )
 
@@ -24,42 +27,78 @@ type Entry struct {
 }
 
 type SearchOptions struct {
-	Query     string
-	Limit     int
-	Offset    int
-	OnlyDirs  bool
-	OnlyFiles bool
-	Ext       string
-	Root      string
+	Query        string
+	PathQuery    string
+	SearchInPath bool
+	Limit        int
+	Offset       int
+	OnlyDirs     bool
+	OnlyFiles    bool
+	Ext          string
+	Root         string
 }
 
 type Store struct {
-	db *sql.DB
+	db  *sql.DB
+	bun *bun.DB
 }
 
 func Open(ctx context.Context, dbPath string) (*Store, error) {
+	store, err := openStore(ctx, dbPath)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.setup(ctx); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+func openStore(_ context.Context, dbPath string) (*Store, error) {
 	if dbPath == "" {
 		return nil, errors.New("db path is required")
 	}
 
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)", dbPath)
-	db, err := sql.Open("sqlite", dsn)
+	sqlDB, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
 	}
 
-	store := &Store{db: db}
-	if err := store.setup(ctx); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-
-	return store, nil
+	bunDB := bun.NewDB(sqlDB, sqlitedialect.New())
+	return &Store{db: sqlDB, bun: bunDB}, nil
 }
 
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	if s.bun != nil {
+		_ = s.bun.Close()
+	}
+	if s.db != nil {
+		return s.db.Close()
+	}
+	return nil
+}
 
 func (s *Store) setup(ctx context.Context) error {
+	if err := s.applyPragmas(ctx); err != nil {
+		return err
+	}
+	if err := s.migrateLegacyPathSchema(ctx); err != nil {
+		return err
+	}
+	if err := applyMigrations(ctx, s.db); err != nil {
+		return err
+	}
+	version, err := currentSchemaVersion(ctx, s.db)
+	if err != nil {
+		return err
+	}
+	log.Printf("db schema version=%d", version)
+	return nil
+}
+
+func (s *Store) applyPragmas(ctx context.Context) error {
 	pragmas := []string{
 		"PRAGMA journal_mode=WAL;",
 		"PRAGMA synchronous=NORMAL;",
@@ -71,41 +110,182 @@ func (s *Store) setup(ctx context.Context) error {
 			return err
 		}
 	}
+	return nil
+}
 
-	schema := []string{
-		`CREATE TABLE IF NOT EXISTS entries (
+func (s *Store) migrateLegacyPathSchema(ctx context.Context) error {
+	hasEntries, err := s.tableExists(ctx, "entries")
+	if err != nil {
+		return err
+	}
+	if !hasEntries {
+		return nil
+	}
+
+	hasPath, err := s.tableHasColumn(ctx, "entries", "path")
+	if err != nil {
+		return err
+	}
+	hasDirID, err := s.tableHasColumn(ctx, "entries", "dir_id")
+	if err != nil {
+		return err
+	}
+
+	if !hasPath || hasDirID {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	setup := []string{
+		`DROP TRIGGER IF EXISTS entries_ai;`,
+		`DROP TRIGGER IF EXISTS entries_ad;`,
+		`DROP TRIGGER IF EXISTS entries_au;`,
+		`DROP TABLE IF EXISTS entries_fts;`,
+		`CREATE TABLE IF NOT EXISTS directories (
+			id INTEGER PRIMARY KEY,
+			path TEXT NOT NULL UNIQUE
+		);`,
+		`CREATE TABLE IF NOT EXISTS entries_v2 (
 			id INTEGER PRIMARY KEY,
 			name TEXT NOT NULL,
-			path TEXT NOT NULL UNIQUE,
+			dir_id INTEGER NOT NULL,
 			ext TEXT NOT NULL,
 			size INTEGER NOT NULL,
 			mtime INTEGER NOT NULL,
 			is_dir INTEGER NOT NULL,
 			root TEXT NOT NULL,
-			indexed_at INTEGER NOT NULL
+			indexed_at INTEGER NOT NULL,
+			UNIQUE(dir_id, name),
+			FOREIGN KEY(dir_id) REFERENCES directories(id) ON DELETE CASCADE
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_entries_root ON entries(root);`,
-		`CREATE INDEX IF NOT EXISTS idx_entries_name ON entries(name);`,
-		`CREATE INDEX IF NOT EXISTS idx_entries_ext ON entries(ext);`,
-		ftsSchemaStmt(),
-		`CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
-			INSERT INTO entries_fts(rowid, name, path) VALUES (new.id, new.name, new.path);
-		END;`,
-		`CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
-			INSERT INTO entries_fts(entries_fts, rowid, name, path) VALUES ('delete', old.id, old.name, old.path);
-		END;`,
-		`CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN
-			INSERT INTO entries_fts(entries_fts, rowid, name, path) VALUES ('delete', old.id, old.name, old.path);
-			INSERT INTO entries_fts(rowid, name, path) VALUES (new.id, new.name, new.path);
-		END;`,
 	}
-
-	for _, stmt := range schema {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+	for _, stmt := range setup {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return err
 		}
 	}
-	return nil
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, name, path, ext, size, mtime, is_dir, root, indexed_at
+		FROM entries
+		ORDER BY id ASC`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	insertDir, err := tx.PrepareContext(ctx, `INSERT INTO directories(path) VALUES (?) ON CONFLICT(path) DO NOTHING`)
+	if err != nil {
+		return err
+	}
+	defer insertDir.Close()
+
+	selectDirID, err := tx.PrepareContext(ctx, `SELECT id FROM directories WHERE path = ?`)
+	if err != nil {
+		return err
+	}
+	defer selectDirID.Close()
+
+	insertEntry, err := tx.PrepareContext(ctx, `
+		INSERT INTO entries_v2(id, name, dir_id, ext, size, mtime, is_dir, root, indexed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer insertEntry.Close()
+
+	for rows.Next() {
+		var (
+			id        int64
+			name      string
+			fullPath  string
+			ext       string
+			size      int64
+			mtime     int64
+			isDirInt  int
+			root      string
+			indexedAt int64
+		)
+		if err := rows.Scan(&id, &name, &fullPath, &ext, &size, &mtime, &isDirInt, &root, &indexedAt); err != nil {
+			return err
+		}
+
+		dirPath, baseName := splitPath(fullPath)
+		if baseName == "" || baseName == "." {
+			baseName = name
+		}
+		if _, err := insertDir.ExecContext(ctx, dirPath); err != nil {
+			return err
+		}
+
+		var dirID int64
+		if err := selectDirID.QueryRowContext(ctx, dirPath).Scan(&dirID); err != nil {
+			return err
+		}
+
+		if _, err := insertEntry.ExecContext(ctx, id, baseName, dirID, ext, size, mtime, isDirInt, root, indexedAt); err != nil {
+			return err
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	swap := []string{
+		`DROP TABLE entries;`,
+		`ALTER TABLE entries_v2 RENAME TO entries;`,
+	}
+	for _, stmt := range swap {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	_, err = s.db.ExecContext(ctx, `VACUUM;`)
+	return err
+}
+
+func (s *Store) tableExists(ctx context.Context, table string) (bool, error) {
+	var count int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&count)
+	return count > 0, err
+}
+
+func (s *Store) tableHasColumn(ctx context.Context, table, column string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid       int
+			name      string
+			typ       string
+			notNull   int
+			dfltValue any
+			pk        int
+		)
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &pk); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 func (s *Store) UpsertBatch(ctx context.Context, entries []Entry) error {
@@ -133,45 +313,86 @@ func (s *Store) UpsertBatch(ctx context.Context, entries []Entry) error {
 }
 
 func (s *Store) upsertBatchOnce(ctx context.Context, entries []Entry) error {
-	var err error
+	return s.bun.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		now := time.Now().Unix()
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
+		dirSet := make(map[string]struct{}, len(entries))
+		for _, entry := range entries {
+			dirPath, _ := splitPath(entry.Path)
+			dirSet[dirPath] = struct{}{}
 		}
-	}()
 
-	stmt, err := tx.PrepareContext(ctx, `
-		INSERT INTO entries(name, path, ext, size, mtime, is_dir, root, indexed_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(path) DO UPDATE SET
-			name=excluded.name,
-			ext=excluded.ext,
-			size=excluded.size,
-			mtime=excluded.mtime,
-			is_dir=excluded.is_dir,
-			root=excluded.root,
-			indexed_at=excluded.indexed_at
-	`)
-	if err != nil {
-		return err
-	}
-	defer stmt.Close()
-
-	now := time.Now().Unix()
-	for _, entry := range entries {
-		_, err = stmt.ExecContext(ctx, entry.Name, entry.Path, entry.Ext, entry.Size, entry.MTime, boolToInt(entry.IsDir), entry.Root, now)
-		if err != nil {
-			return err
+		dirs := make([]*DirectoryModel, 0, len(dirSet))
+		paths := make([]string, 0, len(dirSet))
+		for path := range dirSet {
+			dirs = append(dirs, &DirectoryModel{Path: path})
+			paths = append(paths, path)
 		}
-	}
 
-	err = tx.Commit()
-	return err
+		if len(dirs) > 0 {
+			if _, err := tx.NewInsert().
+				Model(&dirs).
+				On("CONFLICT (path) DO NOTHING").
+				Exec(ctx); err != nil {
+				return err
+			}
+		}
+
+		var directoryRows []DirectoryModel
+		if len(paths) > 0 {
+			if err := tx.NewSelect().
+				Model(&directoryRows).
+				Where("path IN (?)", bun.In(paths)).
+				Scan(ctx); err != nil {
+				return err
+			}
+		}
+
+		dirIDByPath := make(map[string]int64, len(directoryRows))
+		for _, row := range directoryRows {
+			dirIDByPath[row.Path] = row.ID
+		}
+
+		models := make([]*EntryModel, 0, len(entries))
+		for _, entry := range entries {
+			dirPath, baseName := splitPath(entry.Path)
+			dirID, ok := dirIDByPath[dirPath]
+			if !ok {
+				return fmt.Errorf("directory id not found for path %q", dirPath)
+			}
+
+			name := strings.TrimSpace(entry.Name)
+			if name == "" {
+				name = baseName
+			}
+			models = append(models, &EntryModel{
+				Name:      name,
+				DirID:     dirID,
+				Ext:       entry.Ext,
+				Size:      entry.Size,
+				MTime:     entry.MTime,
+				IsDir:     entry.IsDir,
+				Root:      entry.Root,
+				IndexedAt: now,
+			})
+		}
+
+		if len(models) == 0 {
+			return nil
+		}
+
+		_, err := tx.NewInsert().
+			Model(&models).
+			On("CONFLICT (dir_id, name) DO UPDATE").
+			Set("ext = EXCLUDED.ext").
+			Set("size = EXCLUDED.size").
+			Set("mtime = EXCLUDED.mtime").
+			Set("is_dir = EXCLUDED.is_dir").
+			Set("root = EXCLUDED.root").
+			Set("indexed_at = EXCLUDED.indexed_at").
+			Exec(ctx)
+		return err
+	})
 }
 
 func isBusyError(err error) bool {
@@ -183,16 +404,56 @@ func isBusyError(err error) bool {
 }
 
 func (s *Store) DeleteByPath(ctx context.Context, path string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM entries WHERE path = ?`, path)
-	return err
+	if strings.TrimSpace(path) == "" {
+		return nil
+	}
+	dirPath, baseName := splitPath(path)
+
+	_, err := s.bun.NewDelete().
+		Model((*EntryModel)(nil)).
+		Where("name = ?", baseName).
+		Where("dir_id = (SELECT id FROM directories WHERE path = ?)", dirPath).
+		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	return s.pruneEmptyDirectories(ctx)
 }
 
 func (s *Store) DeleteByPrefix(ctx context.Context, prefix string) error {
-	if prefix == "" {
+	if strings.TrimSpace(prefix) == "" {
 		return nil
 	}
 	clean := filepath.Clean(prefix)
-	_, err := s.db.ExecContext(ctx, `DELETE FROM entries WHERE path = ? OR path LIKE ?`, clean, clean+"/%")
+
+	subQuery := s.bun.NewSelect().
+		TableExpr("entries AS e").
+		Column("e.id").
+		Join("JOIN directories AS d ON d.id = e.dir_id").
+		Where("d.path = ?", clean).
+		WhereOr("d.path LIKE ?", clean+"/%").
+		WhereOr("(CASE WHEN d.path = '/' THEN '/' || e.name ELSE d.path || '/' || e.name END) = ?", clean).
+		WhereOr("(CASE WHEN d.path = '/' THEN '/' || e.name ELSE d.path || '/' || e.name END) LIKE ?", clean+"/%")
+
+	_, err := s.bun.NewDelete().
+		Model((*EntryModel)(nil)).
+		Where("id IN (?)", subQuery).
+		Exec(ctx)
+	if err != nil {
+		return err
+	}
+	return s.pruneEmptyDirectories(ctx)
+}
+
+func (s *Store) pruneEmptyDirectories(ctx context.Context) error {
+	subQuery := s.bun.NewSelect().
+		TableExpr("entries").
+		ColumnExpr("DISTINCT dir_id")
+
+	_, err := s.bun.NewDelete().
+		Model((*DirectoryModel)(nil)).
+		Where("id NOT IN (?)", subQuery).
+		Exec(ctx)
 	return err
 }
 
@@ -202,7 +463,8 @@ func (s *Store) Search(ctx context.Context, query string, limit, offset int) ([]
 
 func (s *Store) SearchAdvanced(ctx context.Context, opts SearchOptions) ([]Entry, error) {
 	query := strings.TrimSpace(opts.Query)
-	if query == "" {
+	pathQuery := strings.TrimSpace(opts.PathQuery)
+	if query == "" && (!opts.SearchInPath || pathQuery == "") {
 		return nil, nil
 	}
 	if opts.Limit <= 0 {
@@ -212,17 +474,30 @@ func (s *Store) SearchAdvanced(ctx context.Context, opts SearchOptions) ([]Entry
 		opts.Offset = 0
 	}
 
+	if pathQuery == "" && opts.SearchInPath {
+		pathQuery = query
+	}
+
+	if query == "" {
+		return s.searchByLike(ctx, "*", pathQuery, opts)
+	}
+
 	if strings.HasPrefix(query, "*") || strings.HasSuffix(query, "*") {
-		return s.searchByLike(ctx, query, opts)
+		return s.searchByLike(ctx, query, pathQuery, opts)
 	}
 
 	q := `
-		SELECT e.name, e.path, e.ext, e.size, e.mtime, e.is_dir, e.root, e.indexed_at
+		SELECT e.name, d.path, e.ext, e.size, e.mtime, e.is_dir, e.root, e.indexed_at
 		FROM entries_fts f
 		JOIN entries e ON e.id = f.rowid
+		JOIN directories d ON d.id = e.dir_id
 		WHERE entries_fts MATCH ?`
 	args := []any{buildFTSQuery(query)}
 	q, args = applySearchFilters(q, args, opts)
+	if opts.SearchInPath && pathQuery != "" {
+		q += ` AND (CASE WHEN d.path = '/' THEN '/' || e.name ELSE d.path || '/' || e.name END) LIKE ?`
+		args = append(args, wildcardToLike(pathQuery))
+	}
 	q += `
 		ORDER BY
 			CASE
@@ -231,7 +506,7 @@ func (s *Store) SearchAdvanced(ctx context.Context, opts SearchOptions) ([]Entry
 				ELSE 2
 			END,
 			e.name ASC,
-			e.path ASC
+			d.path ASC
 		LIMIT ? OFFSET ?`
 	args = append(args, query, query+"%", opts.Limit, opts.Offset)
 
@@ -244,19 +519,26 @@ func (s *Store) SearchAdvanced(ctx context.Context, opts SearchOptions) ([]Entry
 	return scanEntries(rows, opts.Limit)
 }
 
-func (s *Store) searchByLike(ctx context.Context, query string, opts SearchOptions) ([]Entry, error) {
-	like := strings.ReplaceAll(query, "*", "%")
-	if !strings.Contains(like, "%") {
-		like = "%" + like + "%"
+func (s *Store) searchByLike(ctx context.Context, query, pathQuery string, opts SearchOptions) ([]Entry, error) {
+	nameLike := wildcardToLike(query)
+	if nameLike == "" {
+		nameLike = "%"
 	}
 
 	q := `
-		SELECT e.name, e.path, e.ext, e.size, e.mtime, e.is_dir, e.root, e.indexed_at
+		SELECT e.name, d.path, e.ext, e.size, e.mtime, e.is_dir, e.root, e.indexed_at
 		FROM entries e
-		WHERE (e.name LIKE ? OR e.path LIKE ?)`
-	args := []any{like, like}
+		JOIN directories d ON d.id = e.dir_id
+		WHERE e.name LIKE ?`
+	args := []any{nameLike}
+
+	if opts.SearchInPath && pathQuery != "" {
+		q += ` AND (CASE WHEN d.path = '/' THEN '/' || e.name ELSE d.path || '/' || e.name END) LIKE ?`
+		args = append(args, wildcardToLike(pathQuery))
+	}
+
 	q, args = applySearchFilters(q, args, opts)
-	q += ` ORDER BY e.name ASC, e.path ASC LIMIT ? OFFSET ?`
+	q += ` ORDER BY e.name ASC, d.path ASC LIMIT ? OFFSET ?`
 	args = append(args, opts.Limit, opts.Offset)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
@@ -291,12 +573,14 @@ func scanEntries(rows *sql.Rows, capacity int) ([]Entry, error) {
 	for rows.Next() {
 		var (
 			entry     Entry
+			dirPath   string
 			isDirInt  int
 			indexedAt int64
 		)
-		if err := rows.Scan(&entry.Name, &entry.Path, &entry.Ext, &entry.Size, &entry.MTime, &isDirInt, &entry.Root, &indexedAt); err != nil {
+		if err := rows.Scan(&entry.Name, &dirPath, &entry.Ext, &entry.Size, &entry.MTime, &isDirInt, &entry.Root, &indexedAt); err != nil {
 			return nil, err
 		}
+		entry.Path = joinPath(dirPath, entry.Name)
 		entry.IsDir = isDirInt == 1
 		entry.Indexed = time.Unix(indexedAt, 0)
 		out = append(out, entry)
@@ -313,18 +597,35 @@ func NewEntryFromPath(root, path string, size int64, mtime time.Time, isDir bool
 	if !isDir {
 		ext = strings.ToLower(strings.TrimPrefix(filepath.Ext(base), "."))
 	}
-	return Entry{Name: base, Path: path, Ext: ext, Size: size, MTime: mtime.Unix(), IsDir: isDir, Root: root}
+	return Entry{Name: base, Path: filepath.Clean(path), Ext: ext, Size: size, MTime: mtime.Unix(), IsDir: isDir, Root: root}
 }
 
 func (s *Store) ReindexFTS(ctx context.Context) error {
-	schema := []string{
+	stmts := []string{
+		`DROP TRIGGER IF EXISTS entries_ai;`,
+		`DROP TRIGGER IF EXISTS entries_ad;`,
+		`DROP TRIGGER IF EXISTS entries_au;`,
 		`DROP TABLE IF EXISTS entries_fts;`,
-		ftsSchemaStmt(),
-		`INSERT INTO entries_fts(rowid, name, path)
-		 SELECT id, name, path FROM entries;`,
+		`CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
+			name,
+			content='entries',
+			content_rowid='id',
+			tokenize='unicode61 remove_diacritics 2',
+			prefix='3'
+		);`,
+		`INSERT INTO entries_fts(rowid, name) SELECT id, name FROM entries;`,
+		`CREATE TRIGGER IF NOT EXISTS entries_ai AFTER INSERT ON entries BEGIN
+			INSERT INTO entries_fts(rowid, name) VALUES (new.id, new.name);
+		END;`,
+		`CREATE TRIGGER IF NOT EXISTS entries_ad AFTER DELETE ON entries BEGIN
+			INSERT INTO entries_fts(entries_fts, rowid, name) VALUES ('delete', old.id, old.name);
+		END;`,
+		`CREATE TRIGGER IF NOT EXISTS entries_au AFTER UPDATE ON entries BEGIN
+			INSERT INTO entries_fts(entries_fts, rowid, name) VALUES ('delete', old.id, old.name);
+			INSERT INTO entries_fts(rowid, name) VALUES (new.id, new.name);
+		END;`,
 	}
-
-	for _, stmt := range schema {
+	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return err
 		}
@@ -334,19 +635,8 @@ func (s *Store) ReindexFTS(ctx context.Context) error {
 
 func (s *Store) Count(ctx context.Context) (int64, error) {
 	var total int64
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM entries`).Scan(&total)
+	err := s.bun.NewSelect().Model((*EntryModel)(nil)).ColumnExpr("COUNT(*)").Scan(ctx, &total)
 	return total, err
-}
-
-func ftsSchemaStmt() string {
-	return `CREATE VIRTUAL TABLE IF NOT EXISTS entries_fts USING fts5(
-		name,
-		path,
-		content='entries',
-		content_rowid='id',
-		tokenize='unicode61 remove_diacritics 2',
-		prefix='2 3 4'
-	);`
 }
 
 func buildFTSQuery(query string) string {
@@ -362,9 +652,25 @@ func buildFTSQuery(query string) string {
 	return strings.Join(chunks, " ")
 }
 
-func boolToInt(v bool) int {
-	if v {
-		return 1
+func wildcardToLike(query string) string {
+	like := strings.TrimSpace(strings.ReplaceAll(query, "*", "%"))
+	if like == "" {
+		return ""
 	}
-	return 0
+	if !strings.Contains(like, "%") {
+		like = "%" + like + "%"
+	}
+	return like
+}
+
+func splitPath(path string) (dirPath, baseName string) {
+	clean := filepath.Clean(path)
+	return filepath.Dir(clean), filepath.Base(clean)
+}
+
+func joinPath(dirPath, baseName string) string {
+	if dirPath == "/" {
+		return filepath.Clean("/" + baseName)
+	}
+	return filepath.Clean(filepath.Join(dirPath, baseName))
 }

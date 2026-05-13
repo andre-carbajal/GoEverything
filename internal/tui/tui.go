@@ -66,10 +66,11 @@ type model struct {
 	menu       []string
 	menuCursor int
 
-	searchInput textinput.Model
-	searchSeq   int
-	searchRes   []db.Entry
-	searchCur   int
+	searchInput  textinput.Model
+	searchSeq    int
+	searchRes    []db.Entry
+	searchCur    int
+	searchInPath bool
 
 	searchListFocus bool
 
@@ -211,7 +212,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.searchRes = nil
 			return m, nil
 		}
-		return m, searchCmd(m.ctx, m.cfg.DBPath, msg.query)
+		return m, searchCmd(m.ctx, m.cfg.DBPath, msg.query, m.searchInPath)
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -232,6 +233,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.status = "manual scan in progress…"
 				return m.startScanCmd(roots, "manual-scan", false)
+			}
+		case "ctrl+p":
+			if m.mode == viewSearch {
+				m.searchInPath = !m.searchInPath
+				m.searchSeq++
+				return m, debounceCmd(m.searchSeq, m.searchInput.Value())
 			}
 		case "esc":
 			if m.mode == viewConfig && (m.cfgInputActive || m.cfgThemePicker || m.cfgPathPicker) {
@@ -525,7 +532,7 @@ func (m model) View() string {
 	if m.mode == viewConfig {
 		keys = "j/k move • enter select/edit • a add exclude • d remove exclude • ctrl+g scan now • esc back • q quit"
 	} else if m.mode == viewSearch {
-		keys = "tab focus input/list • j/k move list • enter open folder • / focus search • ctrl+g scan now • ctrl+x stop scan • esc back • q quit"
+		keys = "tab focus input/list • j/k move list • enter open folder • / focus search • ctrl+p toggle path filter • ctrl+g scan now • ctrl+x stop scan • esc back • q quit"
 	}
 	b.WriteString(m.theme.Muted.Render("keys: " + keys))
 	return m.theme.Container.Render(b.String())
@@ -700,6 +707,9 @@ func (m model) viewSearch() string {
 		m.theme.Muted.Render(" in "),
 		chip(m.cfg.DefaultScanPath, true),
 	)
+	if m.searchInPath {
+		top = lipgloss.JoinHorizontal(lipgloss.Center, top, " ", chip("path-filter", true))
+	}
 	lines = append(lines, top)
 
 	searchBox := lipgloss.NewStyle().
@@ -894,7 +904,7 @@ func (m model) viewConfig() string {
 	return m.panelStyle().Width(outerWidth).Render(layout)
 }
 
-func searchCmd(ctx context.Context, dbPath, query string) tea.Cmd {
+func searchCmd(ctx context.Context, dbPath, query string, searchInPath bool) tea.Cmd {
 	return func() tea.Msg {
 		store, err := db.Open(ctx, dbPath)
 		if err != nil {
@@ -902,9 +912,10 @@ func searchCmd(ctx context.Context, dbPath, query string) tea.Cmd {
 		}
 		defer store.Close()
 		res, err := store.SearchAdvanced(ctx, db.SearchOptions{
-			Query:  query,
-			Limit:  100,
-			Offset: 0,
+			Query:        query,
+			SearchInPath: searchInPath,
+			Limit:        100,
+			Offset:       0,
 		})
 		return searchDoneMsg{query: query, results: res, err: err}
 	}

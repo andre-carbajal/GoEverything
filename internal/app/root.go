@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"text/tabwriter"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -32,6 +33,8 @@ type options struct {
 	SearchFormat string
 	SearchExt    string
 	SearchRoot   string
+	SearchInPath bool
+	PathQuery    string
 	OnlyFiles    bool
 	OnlyDirs     bool
 }
@@ -91,6 +94,7 @@ func NewRootCommand() *cobra.Command {
 	cmd.AddCommand(newScanCommand(&opt, &cfg))
 	cmd.AddCommand(newReindexCommand(&opt))
 	cmd.AddCommand(newSearchCommand(&opt))
+	cmd.AddCommand(newDBCommand(&opt))
 	cmd.AddCommand(newWatchCommand(&opt))
 	cmd.AddCommand(newRootsCommand())
 
@@ -188,13 +192,15 @@ func newSearchCommand(opt *options) *cobra.Command {
 			defer store.Close()
 
 			searchOpts := db.SearchOptions{
-				Query:     opt.Query,
-				Limit:     opt.Limit,
-				Offset:    opt.Offset,
-				OnlyDirs:  opt.OnlyDirs,
-				OnlyFiles: opt.OnlyFiles,
-				Ext:       opt.SearchExt,
-				Root:      opt.SearchRoot,
+				Query:        opt.Query,
+				PathQuery:    opt.PathQuery,
+				SearchInPath: opt.SearchInPath,
+				Limit:        opt.Limit,
+				Offset:       opt.Offset,
+				OnlyDirs:     opt.OnlyDirs,
+				OnlyFiles:    opt.OnlyFiles,
+				Ext:          opt.SearchExt,
+				Root:         opt.SearchRoot,
 			}
 
 			results, err := store.SearchAdvanced(cmd.Context(), searchOpts)
@@ -220,9 +226,20 @@ func newSearchCommand(opt *options) *cobra.Command {
 	command.Flags().StringVar(&opt.SearchFormat, "format", "table", "Output format: table|json")
 	command.Flags().StringVar(&opt.SearchExt, "ext", "", "Filter by extension (example: go or .go)")
 	command.Flags().StringVar(&opt.SearchRoot, "root", "", "Filter results by indexed root")
+	command.Flags().BoolVar(&opt.SearchInPath, "in-path", false, "Enable explicit filtering by full path")
+	command.Flags().StringVar(&opt.PathQuery, "path-query", "", "Path filter pattern (supports * wildcard); implies --in-path")
 	command.Flags().BoolVar(&opt.OnlyFiles, "only-files", false, "Return only files")
 	command.Flags().BoolVar(&opt.OnlyDirs, "only-dirs", false, "Return only directories")
-	_ = command.MarkFlagRequired("query")
+	command.MarkFlagsMutuallyExclusive("only-files", "only-dirs")
+	command.PreRunE = func(_ *cobra.Command, _ []string) error {
+		if strings.TrimSpace(opt.PathQuery) != "" {
+			opt.SearchInPath = true
+		}
+		if strings.TrimSpace(opt.Query) == "" && strings.TrimSpace(opt.PathQuery) == "" {
+			return fmt.Errorf("at least one search term is required (--query or --path-query)")
+		}
+		return nil
+	}
 	return command
 }
 
@@ -272,6 +289,63 @@ func newRootsCommand() *cobra.Command {
 			}
 		},
 	}
+	return command
+}
+
+func newDBCommand(opt *options) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "db",
+		Short: "Database migration and schema commands",
+	}
+
+	command.AddCommand(&cobra.Command{
+		Use:   "migrate",
+		Short: "Apply all pending DB migrations",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			version, err := db.Migrate(cmd.Context(), opt.DBPath)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("migrations_applied current_version=%d\n", version)
+			return nil
+		},
+	})
+
+	command.AddCommand(&cobra.Command{
+		Use:   "version",
+		Short: "Show current DB migration version",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			version, err := db.SchemaVersion(cmd.Context(), opt.DBPath)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("current_version=%d\n", version)
+			return nil
+		},
+	})
+
+	command.AddCommand(&cobra.Command{
+		Use:   "status",
+		Short: "Show migration status table",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			statuses, err := db.SchemaStatus(cmd.Context(), opt.DBPath)
+			if err != nil {
+				return err
+			}
+			w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+			_, _ = fmt.Fprintln(w, "VERSION\tSTATE\tAPPLIED_AT\tFILE")
+			for _, s := range statuses {
+				appliedAt := "-"
+				if !s.AppliedAt.IsZero() {
+					appliedAt = s.AppliedAt.Format(time.RFC3339)
+				}
+				_, _ = fmt.Fprintf(w, "%d\t%s\t%s\t%s\n", s.Version, s.State, appliedAt, s.Name)
+			}
+			_ = w.Flush()
+			return nil
+		},
+	})
+
 	return command
 }
 
