@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"log"
 	"path/filepath"
 	"strings"
 	"time"
@@ -90,11 +89,6 @@ func (s *Store) setup(ctx context.Context) error {
 	if err := applyMigrations(ctx, s.db); err != nil {
 		return err
 	}
-	version, err := currentSchemaVersion(ctx, s.db)
-	if err != nil {
-		return err
-	}
-	log.Printf("db schema version=%d", version)
 	return nil
 }
 
@@ -249,8 +243,10 @@ func (s *Store) migrateLegacyPathSchema(ctx context.Context) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `VACUUM;`)
-	return err
+	if _, err := s.db.ExecContext(ctx, `VACUUM;`); err != nil {
+		return err
+	}
+	return s.ReindexFTS(ctx)
 }
 
 func (s *Store) tableExists(ctx context.Context, table string) (bool, error) {
