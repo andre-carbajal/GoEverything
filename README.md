@@ -205,18 +205,6 @@ ge db version
 
 ---
 
-## Releases (GoReleaser)
-
-This project uses GoReleaser v2 to publish:
-- GitHub release binaries for macOS (darwin amd64/arm64)
-- Homebrew formula updates in `andre-carbajal/homebrew-tap`
-
-Support policy: runtime behavior and UX are currently optimized and supported for macOS only.
-
-Release workflow runs on tag push (`v*`) via `.github/workflows/release.yml`.
-
----
-
 ## Command reference
 
 For full command details:
