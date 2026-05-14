@@ -22,7 +22,7 @@ jobs:
 
   goreleaser:
     name: Release
-    runs-on: ubuntu-latest
+    runs-on: macos-latest
     needs: test
     steps:
       - uses: actions/checkout@v4
