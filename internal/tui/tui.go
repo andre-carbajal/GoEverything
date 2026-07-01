@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/table"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -27,6 +28,15 @@ const (
 	viewMenu viewMode = iota
 	viewSearch
 	viewConfig
+)
+
+type modalMode int
+
+const (
+	noModal modalMode = iota
+	pathModal
+	themeModal
+	excludeInputModal
 )
 
 type searchDoneMsg struct {
@@ -59,14 +69,17 @@ type debounceSearchMsg struct {
 type model struct {
 	ctx context.Context
 
-	cfg       config.Config
-	termWidth int
+	cfg    config.Config
+	width  int
+	height int
 
 	mode       viewMode
+	modal      modalMode
 	menu       []string
 	menuCursor int
 
 	searchInput  textinput.Model
+	searchTable  table.Model
 	searchSeq    int
 	searchRes    []db.Entry
 	searchCur    int
@@ -78,9 +91,7 @@ type model struct {
 	cfgInput       textinput.Model
 	cfgInputActive bool
 	cfgInputTarget string // "scan" | "exclude"
-	cfgThemePicker bool
 	cfgThemeCursor int
-	cfgPathPicker  bool
 	cfgPathCursor  int
 	pathOptions    []string
 
@@ -117,11 +128,13 @@ func newModel(ctx context.Context, cfg config.Config) model {
 	cfgInput.CharLimit = 300
 	cfgInput.Width = 60
 
-	return model{
+	m := model{
 		ctx:         ctx,
 		cfg:         cfg,
-		termWidth:   120,
+		width:       120,
+		height:      36,
 		mode:        viewMenu,
+		modal:       noModal,
 		menu:        []string{"Search", "Scan/Re-index", "Config"},
 		searchInput: searchInput,
 		cfgInput:    cfgInput,
@@ -130,18 +143,122 @@ func newModel(ctx context.Context, cfg config.Config) model {
 		pathOptions: availablePathOptions(),
 		status:      "ready",
 	}
+	m.searchTable = newSearchTable(m.theme)
+	m.resizeComponents()
+	return m
 }
 
 func (m model) Init() tea.Cmd {
 	return tea.Batch(countCmd(m.ctx, m.cfg.DBPath), textinput.Blink)
 }
 
+func newSearchTable(th theme) table.Model {
+	t := table.New(
+		table.WithColumns(searchColumns(80)),
+		table.WithRows(nil),
+		table.WithHeight(10),
+		table.WithWidth(80),
+		table.WithFocused(false),
+		table.WithStyles(searchTableStyles(th)),
+	)
+	return t
+}
+
+func searchTableStyles(th theme) table.Styles {
+	styles := table.DefaultStyles()
+	styles.Header = th.Title.Copy().Padding(0, 0)
+	styles.Cell = th.Text.Copy().Padding(0, 0)
+	styles.Selected = lipgloss.NewStyle().
+		Background(th.SelectBG).
+		Foreground(th.SelectFG).
+		Bold(true)
+	return styles
+}
+
+func searchColumns(width int) []table.Column {
+	width = max(36, width)
+	typeW := 5
+	sizeW := 10
+	gap := 2
+	remaining := max(20, width-typeW-sizeW-gap)
+	nameW := max(12, min(34, remaining/3))
+	dirW := max(12, remaining-nameW)
+	return []table.Column{
+		{Title: "Type", Width: typeW},
+		{Title: "Name", Width: nameW},
+		{Title: "Directory", Width: dirW},
+		{Title: "Size", Width: sizeW},
+	}
+}
+
+func (m model) screenSize() (int, int) {
+	return max(40, m.width), max(14, m.height)
+}
+
+func (m model) bodySize() (int, int) {
+	w, h := m.screenSize()
+	return max(24, w-4), max(8, h-2)
+}
+
+func (m model) contentHeight() int {
+	_, bodyH := m.bodySize()
+	headerH := lipgloss.Height(m.renderTopBar())
+	if m.mode == viewMenu {
+		headerH += lipgloss.Height(m.renderLogo()) + 1
+	}
+	footerH := lipgloss.Height(m.renderStatus()) + lipgloss.Height(m.renderHelp()) + 1
+	return max(3, bodyH-headerH-footerH-2)
+}
+
+func (m *model) resizeComponents() {
+	bodyW, _ := m.bodySize()
+	tableW := max(28, bodyW-6)
+	tableH := max(5, m.contentHeight()-5)
+
+	m.searchInput.Width = min(72, max(24, bodyW-28))
+	m.cfgInput.Width = max(24, min(80, bodyW-12))
+	m.searchTable.SetColumns(searchColumns(tableW))
+	m.searchTable.SetWidth(tableW)
+	m.searchTable.SetHeight(tableH)
+	m.searchTable.SetStyles(searchTableStyles(m.theme))
+}
+
+func (m *model) syncSearchTableRows() {
+	rows := make([]table.Row, 0, len(m.searchRes))
+	for _, entry := range m.searchRes {
+		kind := "file"
+		if entry.IsDir {
+			kind = "dir"
+		}
+		sizeText := "-"
+		if !entry.IsDir {
+			sizeText = fmt.Sprintf("%.1f KB", float64(entry.Size)/1024)
+		}
+		rows = append(rows, table.Row{
+			kind,
+			entry.Name,
+			filepath.Dir(entry.Path),
+			sizeText,
+		})
+	}
+	m.searchTable.SetRows(rows)
+	if len(rows) == 0 {
+		m.searchCur = 0
+		m.searchTable.SetCursor(0)
+		return
+	}
+	if m.searchCur >= len(rows) {
+		m.searchCur = len(rows) - 1
+	}
+	m.searchTable.SetCursor(m.searchCur)
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.termWidth = msg.Width
-		m.searchInput.Width = min(64, max(28, msg.Width-42))
-		m.cfgInput.Width = max(30, msg.Width-20)
+		m.width = msg.Width
+		m.height = msg.Height
+		m.resizeComponents()
 		return m, nil
 
 	case countDoneMsg:
@@ -166,6 +283,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.searchCur >= len(m.searchRes) {
 				m.searchCur = max(0, len(m.searchRes)-1)
 			}
+			m.syncSearchTableRows()
 		}
 		m.err = msg.err
 		return m, nil
@@ -218,6 +336,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.String() {
 		case "ctrl+c", "q":
 			return m, tea.Quit
+		}
+		if m.modal != noModal {
+			return m.handleModalKey(msg)
+		}
+		switch msg.String() {
 		case "ctrl+x":
 			if m.busy && m.scanCancel != nil {
 				m.status = "stopping scan..."
@@ -241,17 +364,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, debounceCmd(m.searchSeq, m.searchInput.Value())
 			}
 		case "esc":
-			if m.mode == viewConfig && (m.cfgInputActive || m.cfgThemePicker || m.cfgPathPicker) {
-				// Let config handlers close inline editors/pickers first.
-				break
-			}
-			if m.cfgInputActive {
-				m.cfgInputActive = false
-				m.cfgInputTarget = ""
-				m.cfgInput.Blur()
-				m.cfgInput.SetValue("")
-				return m, nil
-			}
 			if m.mode != viewMenu {
 				m.mode = viewMenu
 				return m, nil
@@ -262,6 +374,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.searchListFocus = false
 			m.searchInput.Focus()
+			m.searchTable.Blur()
 			return m, nil
 		}
 
@@ -290,6 +403,7 @@ func (m model) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.mode = viewSearch
 			m.searchListFocus = false
 			m.searchInput.Focus()
+			m.searchTable.Blur()
 			return m, nil
 		case "Scan/Re-index":
 			if m.busy {
@@ -315,33 +429,30 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "tab" {
 		m.searchListFocus = !m.searchListFocus
 		if m.searchListFocus {
+			m.syncSearchTableRows()
 			m.searchInput.Blur()
+			m.searchTable.Focus()
 		} else {
 			m.searchInput.Focus()
+			m.searchTable.Blur()
 		}
 		return m, nil
 	}
 
 	if m.searchListFocus {
 		switch msg.String() {
-		case "j", "down":
-			if len(m.searchRes) > 0 && m.searchCur < len(m.searchRes)-1 {
-				m.searchCur++
-			}
-			return m, nil
-		case "k", "up":
-			if m.searchCur > 0 {
-				m.searchCur--
-			}
-			return m, nil
 		case "enter":
 			if len(m.searchRes) > 0 {
+				m.searchCur = m.searchTable.Cursor()
 				path := m.searchRes[m.searchCur].Path
 				return m, openCmd(path, true)
 			}
 			return m, nil
 		}
-		return m, nil
+		var cmd tea.Cmd
+		m.searchTable, cmd = m.searchTable.Update(msg)
+		m.searchCur = max(0, m.searchTable.Cursor())
+		return m, cmd
 	}
 
 	var cmd tea.Cmd
@@ -352,114 +463,6 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.cfgInputActive {
-		switch msg.String() {
-		case "enter":
-			value := strings.TrimSpace(m.cfgInput.Value())
-			m.cfgInput.SetValue("")
-			m.cfgInputActive = false
-			target := m.cfgInputTarget
-			m.cfgInputTarget = ""
-			m.cfgInput.Blur()
-			if value == "" {
-				return m, nil
-			}
-			if target == "scan" {
-				root, err := config.ExpandPath(value)
-				if err != nil {
-					m.err = err
-					return m, nil
-				}
-				info, statErr := os.Stat(root)
-				if statErr != nil || !info.IsDir() {
-					if statErr != nil {
-						m.err = statErr
-					} else {
-						m.err = fmt.Errorf("%s is not a directory", root)
-					}
-					return m, nil
-				}
-				m.cfg.DefaultScanPath = value
-				if err := config.Save(m.cfg); err != nil {
-					m.err = err
-				} else {
-					m.status = "saved scan location"
-				}
-				return m, nil
-			}
-			if !slices.Contains(m.cfg.Excludes, value) {
-				m.cfg.Excludes = append(m.cfg.Excludes, value)
-				slices.Sort(m.cfg.Excludes)
-				if err := config.Save(m.cfg); err != nil {
-					m.err = err
-				} else {
-					m.status = "exclude added"
-				}
-			}
-			return m, nil
-		case "esc":
-			m.cfgInputActive = false
-			m.cfgInputTarget = ""
-			m.cfgInput.Blur()
-			m.cfgInput.SetValue("")
-			return m, nil
-		}
-		var cmd tea.Cmd
-		m.cfgInput, cmd = m.cfgInput.Update(msg)
-		return m, cmd
-	}
-
-	if m.cfgThemePicker {
-		switch msg.String() {
-		case "j", "down":
-			m.cfgThemeCursor = min(len(m.themes)-1, m.cfgThemeCursor+1)
-		case "k", "up":
-			m.cfgThemeCursor = max(0, m.cfgThemeCursor-1)
-		case "enter":
-			m.cfg.Theme = m.themes[m.cfgThemeCursor]
-			m.theme = themeByName(m.cfg.Theme)
-			m.cfgThemePicker = false
-			if err := config.Save(m.cfg); err != nil {
-				m.err = err
-			} else {
-				m.status = "theme updated"
-			}
-		case "esc":
-			m.cfgThemePicker = false
-		}
-		return m, nil
-	}
-
-	if m.cfgPathPicker {
-		switch msg.String() {
-		case "j", "down":
-			m.cfgPathCursor = min(len(m.pathOptions)-1, m.cfgPathCursor+1)
-		case "k", "up":
-			m.cfgPathCursor = max(0, m.cfgPathCursor-1)
-		case "enter":
-			choice := m.pathOptions[m.cfgPathCursor]
-			if choice == "__custom__" {
-				m.cfgPathPicker = false
-				m.cfgInputActive = true
-				m.cfgInputTarget = "scan"
-				m.cfgInput.SetValue("")
-				m.cfgInput.Placeholder = "Custom scan path (example: ~/Projects)"
-				m.cfgInput.Prompt = "scan-path> "
-				return m, m.cfgInput.Focus()
-			}
-			m.cfg.DefaultScanPath = choice
-			m.cfgPathPicker = false
-			if err := config.Save(m.cfg); err != nil {
-				m.err = err
-			} else {
-				m.status = "saved scan location"
-			}
-		case "esc":
-			m.cfgPathPicker = false
-		}
-		return m, nil
-	}
-
 	totalRows := 2 + len(m.cfg.Excludes) // 0 scan,1 theme,2.. excludes
 	maxCursor := totalRows - 1
 	switch msg.String() {
@@ -468,18 +471,20 @@ func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "k", "up":
 		m.cfgCursor = max(0, m.cfgCursor-1)
 	case "a":
+		m.modal = excludeInputModal
 		m.cfgInputActive = true
 		m.cfgInputTarget = "exclude"
 		m.cfgInput.Placeholder = "Add exclude (example: .git or Library/Caches/*)"
 		m.cfgInput.Prompt = "exclude> "
+		m.cfgInput.SetValue("")
 		return m, m.cfgInput.Focus()
 	case "enter":
 		switch m.cfgCursor {
 		case 0:
-			m.cfgPathPicker = true
+			m.modal = pathModal
 			m.cfgPathCursor = 0
 		case 1:
-			m.cfgThemePicker = true
+			m.modal = themeModal
 			idx := slices.Index(m.themes, m.cfg.Theme)
 			if idx < 0 {
 				idx = 0
@@ -505,40 +510,215 @@ func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m model) View() string {
-	var b strings.Builder
-	if m.mode == viewMenu {
-		b.WriteString(m.viewMenuHeader())
-	} else {
-		b.WriteString(m.viewHeader())
+func (m model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch m.modal {
+	case pathModal:
+		return m.handlePathModalKey(msg)
+	case themeModal:
+		return m.handleThemeModalKey(msg)
+	case excludeInputModal:
+		return m.handleExcludeInputModalKey(msg)
+	default:
+		return m, nil
 	}
-	b.WriteString("\n")
+}
+
+func (m model) closeModal() model {
+	m.modal = noModal
+	m.cfgInputActive = false
+	m.cfgInputTarget = ""
+	m.cfgInput.Blur()
+	m.cfgInput.SetValue("")
+	return m
+}
+
+func (m model) handlePathModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.cfgInputActive {
+		switch msg.String() {
+		case "enter":
+			value := strings.TrimSpace(m.cfgInput.Value())
+			if value == "" {
+				return m.closeModal(), nil
+			}
+			next, err := m.saveScanPath(value)
+			if err != nil {
+				next.err = err
+				return next, nil
+			}
+			return next.closeModal(), nil
+		case "esc":
+			return m.closeModal(), nil
+		}
+		var cmd tea.Cmd
+		m.cfgInput, cmd = m.cfgInput.Update(msg)
+		return m, cmd
+	}
+
+	switch msg.String() {
+	case "j", "down":
+		m.cfgPathCursor = min(len(m.pathOptions)-1, m.cfgPathCursor+1)
+	case "k", "up":
+		m.cfgPathCursor = max(0, m.cfgPathCursor-1)
+	case "enter":
+		choice := m.pathOptions[m.cfgPathCursor]
+		if choice == "__custom__" {
+			m.cfgInputActive = true
+			m.cfgInputTarget = "scan"
+			m.cfgInput.SetValue("")
+			m.cfgInput.Placeholder = "Custom scan path (example: ~/Projects)"
+			m.cfgInput.Prompt = "scan-path> "
+			return m, m.cfgInput.Focus()
+		}
+		next, err := m.saveScanPath(choice)
+		if err != nil {
+			next.err = err
+			return next, nil
+		}
+		return next.closeModal(), nil
+	case "esc":
+		return m.closeModal(), nil
+	}
+	return m, nil
+}
+
+func (m model) handleThemeModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "j", "down":
+		m.cfgThemeCursor = min(len(m.themes)-1, m.cfgThemeCursor+1)
+	case "k", "up":
+		m.cfgThemeCursor = max(0, m.cfgThemeCursor-1)
+	case "enter":
+		m.cfg.Theme = m.themes[m.cfgThemeCursor]
+		m.theme = themeByName(m.cfg.Theme)
+		m.resizeComponents()
+		if err := config.Save(m.cfg); err != nil {
+			m.err = err
+		} else {
+			m.status = "theme updated"
+		}
+		return m.closeModal(), nil
+	case "esc":
+		return m.closeModal(), nil
+	}
+	return m, nil
+}
+
+func (m model) handleExcludeInputModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter":
+		value := strings.TrimSpace(m.cfgInput.Value())
+		if value != "" && !slices.Contains(m.cfg.Excludes, value) {
+			m.cfg.Excludes = append(m.cfg.Excludes, value)
+			slices.Sort(m.cfg.Excludes)
+			if err := config.Save(m.cfg); err != nil {
+				m.err = err
+			} else {
+				m.status = "exclude added"
+			}
+		}
+		return m.closeModal(), nil
+	case "esc":
+		return m.closeModal(), nil
+	}
+	var cmd tea.Cmd
+	m.cfgInput, cmd = m.cfgInput.Update(msg)
+	return m, cmd
+}
+
+func (m model) saveScanPath(value string) (model, error) {
+	root, err := config.ExpandPath(value)
+	if err != nil {
+		return m, err
+	}
+	info, statErr := os.Stat(root)
+	if statErr != nil {
+		return m, statErr
+	}
+	if !info.IsDir() {
+		return m, fmt.Errorf("%s is not a directory", root)
+	}
+	m.cfg.DefaultScanPath = value
+	if err := config.Save(m.cfg); err != nil {
+		return m, err
+	}
+	m.status = "saved scan location"
+	return m, nil
+}
+
+func (m model) View() string {
+	m.resizeComponents()
+	return m.renderFrame()
+}
+
+func (m model) renderFrame() string {
+	screenW, screenH := m.screenSize()
+	bodyW, bodyH := m.bodySize()
+
+	parts := make([]string, 0, 5)
+	if m.mode == viewMenu {
+		parts = append(parts, m.renderLogo())
+	}
+	parts = append(parts, m.renderTopBar())
+
+	status := m.renderStatus()
+	help := m.renderHelp()
+	contentH := m.contentHeight()
+	content := m.renderContent(bodyW, contentH)
+	if m.modal != noModal {
+		content = m.renderModal(bodyW, contentH)
+	}
+	parts = append(parts, content, status, help)
+
+	body := lipgloss.JoinVertical(lipgloss.Left, parts...)
+	body = lipgloss.NewStyle().Width(bodyW).Height(bodyH).Render(body)
+
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(m.theme.Border).
+		Padding(0, 1).
+		Width(screenW - 2).
+		Height(screenH - 2).
+		Render(body)
+}
+
+func (m model) renderContent(width, height int) string {
+	var content string
 	switch m.mode {
 	case viewMenu:
-		b.WriteString(m.viewMenu())
+		content = m.viewMenu(width)
 	case viewSearch:
-		b.WriteString(m.viewSearch())
+		content = m.viewSearch(width, height)
 	case viewConfig:
-		b.WriteString(m.viewConfig())
+		content = m.viewConfig(width, height)
 	}
-	b.WriteString("\n")
+	return lipgloss.Place(width, height, lipgloss.Left, lipgloss.Top, content)
+}
+
+func (m model) renderStatus() string {
+	maxWidth := max(20, m.width-6)
 	if m.err != nil {
-		b.WriteString(m.theme.Err.Render("error: " + m.err.Error()))
-	} else if !m.busy {
-		b.WriteString(m.theme.Muted.Render("status: " + m.status))
+		return m.theme.Err.Render(trimMiddle("error: "+m.err.Error(), maxWidth))
 	}
-	b.WriteString("\n")
+	status := "status: " + m.status
+	if m.busy {
+		status = "status: scanning"
+	}
+	return m.theme.Muted.Render(trimMiddle(status, maxWidth))
+}
+
+func (m model) renderHelp() string {
 	keys := "j/k move • enter select • ctrl+g scan now • ctrl+x stop scan • esc back • q quit"
-	if m.mode == viewConfig {
+	if m.modal != noModal {
+		keys = "j/k move • enter select • esc close modal • q quit"
+	} else if m.mode == viewConfig {
 		keys = "j/k move • enter select/edit • a add exclude • d remove exclude • ctrl+g scan now • esc back • q quit"
 	} else if m.mode == viewSearch {
 		keys = "tab focus input/list • j/k move list • enter open folder • / focus search • ctrl+p toggle path filter • ctrl+g scan now • ctrl+x stop scan • esc back • q quit"
 	}
-	b.WriteString(m.theme.Muted.Render("keys: " + keys))
-	return m.theme.Container.Render(b.String())
+	return m.theme.Muted.Render(trimMiddle("keys: "+keys, max(20, m.width-6)))
 }
 
-func (m model) viewMenuHeader() string {
+func (m model) renderLogo() string {
 	ascii := []string{
 		"   █████████           ██████████                                            █████    █████       ███                     ",
 		"  ███░░░░░███         ░░███░░░░░█                                           ░░███    ░░███       ░░░                      ",
@@ -554,7 +734,7 @@ func (m model) viewMenuHeader() string {
 	}
 	asciiBlock := strings.Join(ascii, "\n")
 	asciiWidth := lipgloss.Width(asciiBlock)
-	available := max(20, m.termWidth-6)
+	available, _ := m.bodySize()
 
 	logo := m.theme.Header.Render(asciiBlock)
 	if asciiWidth > available {
@@ -568,19 +748,12 @@ func (m model) viewMenuHeader() string {
 			Padding(0, 1).
 			Render(m.theme.Header.Render(compactLabel))
 	}
-	return logo + "\n" + m.viewTopBar()
+	return logo
 }
 
-func (m model) viewHeader() string {
-	return m.viewTopBar()
-}
-
-func (m model) viewTopBar() string {
-	innerWidth := m.termWidth - 8
-	if innerWidth < 36 {
-		innerWidth = max(24, m.termWidth-2)
-	}
-	innerWidth = min(112, innerWidth)
+func (m model) renderTopBar() string {
+	bodyW, _ := m.bodySize()
+	innerWidth := max(24, min(bodyW, 120))
 
 	scopeLen := max(8, innerWidth/4)
 	basePlain := fmt.Sprintf("◌ GoEverything %d indexed scope %s", m.totalIndexed, trimMiddle(m.cfg.DefaultScanPath, scopeLen))
@@ -624,7 +797,7 @@ func (m model) viewTopBar() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.Border).
 		Padding(0, 1).
-		Width(innerWidth).
+		Width(innerWidth - 2).
 		Render(content)
 	return bar
 }
@@ -655,7 +828,7 @@ func (m model) inputFocusStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Background(m.theme.InputBG).Foreground(m.theme.InputFG)
 }
 
-func (m model) viewMenu() string {
+func (m model) viewMenu(width int) string {
 	type menuCard struct {
 		Title  string
 		Desc   string
@@ -668,7 +841,7 @@ func (m model) viewMenu() string {
 	}
 
 	renderCard := func(card menuCard, active bool) string {
-		base := m.itemStyle(active)
+		base := m.itemStyle(active).Width(max(28, min(54, width-6)))
 
 		title := m.theme.Text.Copy().Bold(true).Render(card.Title)
 		desc := m.theme.Muted.Render(card.Desc)
@@ -686,10 +859,10 @@ func (m model) viewMenu() string {
 	for i, card := range cards {
 		lines = append(lines, renderCard(card, i == m.menuCursor))
 	}
-	return m.panelStyle().Render(strings.Join(lines, "\n\n"))
+	return m.panelStyle().Width(max(32, min(60, width-4))).Render(strings.Join(lines, "\n\n"))
 }
 
-func (m model) viewSearch() string {
+func (m model) viewSearch(width, height int) string {
 	var lines []string
 	chip := func(s string, active bool) string {
 		st := lipgloss.NewStyle().
@@ -725,46 +898,110 @@ func (m model) viewSearch() string {
 
 	if len(m.searchRes) == 0 {
 		lines = append(lines, m.theme.Muted.Render("No results"))
-		return strings.Join(lines, "\n")
-	}
-	maxRows := 18
-	start := max(0, m.searchCur-maxRows/2)
-	end := min(len(m.searchRes), start+maxRows)
-	rowBudget := max(42, m.termWidth-14)
-	nameW := max(14, min(30, rowBudget/4))
-	dirW := max(14, min(46, rowBudget-nameW-18))
-	for i := start; i < end; i++ {
-		entry := m.searchRes[i]
-		prefix := "  "
-		style := m.theme.Text
-		if i == m.searchCur {
-			prefix = "➜ "
-			if m.searchListFocus {
-				style = lipgloss.NewStyle().
-					Background(m.theme.SelectBG).
-					Foreground(m.theme.SelectFG).
-					Bold(true)
-			} else {
-				style = m.theme.Highlight
-			}
+	} else {
+		tableTitle := m.theme.Title.Render("RESULTS")
+		if m.searchListFocus {
+			tableTitle = m.theme.Highlight.Render("RESULTS")
 		}
-		kind := "f"
-		if entry.IsDir {
-			kind = "d"
-		}
-		sizeText := "-"
-		if !entry.IsDir {
-			sizeText = fmt.Sprintf("%.1f KB", float64(entry.Size)/1024)
-		}
-		row := fmt.Sprintf("%s[%s] %-*s %-*s %8s", prefix, kind, nameW, trimMiddle(entry.Name, nameW), dirW, trimMiddle(filepath.Dir(entry.Path), dirW), sizeText)
-		lines = append(lines, style.Render(row))
+		lines = append(lines, tableTitle)
+		lines = append(lines, m.searchTable.View())
 	}
 	card := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.Border).
 		Padding(0, 1).
+		Width(max(24, width-2)).
+		Height(max(3, height-2)).
 		Render(strings.Join(lines, "\n"))
 	return card
+}
+
+func (m model) renderModal(width, height int) string {
+	var modal string
+	switch m.modal {
+	case pathModal:
+		modal = m.renderPathModal(width)
+	case themeModal:
+		modal = m.renderThemeModal(width)
+	case excludeInputModal:
+		modal = m.renderExcludeInputModal(width)
+	default:
+		return m.renderContent(width, height)
+	}
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, modal)
+}
+
+func (m model) modalStyle(width int) lipgloss.Style {
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(m.theme.BorderHi).
+		Padding(1, 2).
+		Width(max(28, min(72, width-8)))
+}
+
+func (m model) renderPathModal(width int) string {
+	lines := []string{
+		m.theme.Title.Render("SELECT LOCATION"),
+		m.theme.Muted.Render("j/k move • enter select • esc cancel"),
+	}
+	if m.cfgInputActive {
+		lines = append(lines,
+			"",
+			m.theme.Muted.Render("Custom scan path"),
+			lipgloss.NewStyle().
+				Border(lipgloss.RoundedBorder()).
+				BorderForeground(m.theme.Input).
+				Padding(0, 1).
+				Render(m.cfgInput.View()),
+		)
+		return m.modalStyle(width).Render(strings.Join(lines, "\n"))
+	}
+	for i, p := range m.pathOptions {
+		label := p
+		if p == "__custom__" {
+			label = "Custom path..."
+		}
+		prefix := "  "
+		st := m.theme.Text
+		if i == m.cfgPathCursor {
+			prefix = "➜ "
+			st = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SelectBG).Bold(true)
+		}
+		lines = append(lines, st.Render(prefix+trimMiddle(label, max(12, min(64, width-16)))))
+	}
+	return m.modalStyle(width).Render(strings.Join(lines, "\n"))
+}
+
+func (m model) renderThemeModal(width int) string {
+	lines := []string{
+		m.theme.Title.Render("SELECT THEME"),
+		m.theme.Muted.Render("j/k move • enter select • esc cancel"),
+		"",
+	}
+	for i, th := range m.themes {
+		prefix := "  "
+		st := m.theme.Text
+		if i == m.cfgThemeCursor {
+			prefix = "➜ "
+			st = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SelectBG).Bold(true)
+		}
+		lines = append(lines, st.Render(prefix+th))
+	}
+	return m.modalStyle(width).Render(strings.Join(lines, "\n"))
+}
+
+func (m model) renderExcludeInputModal(width int) string {
+	lines := []string{
+		m.theme.Title.Render("ADD EXCLUDE PATTERN"),
+		m.theme.Muted.Render("enter save • esc cancel"),
+		"",
+		lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(m.theme.Input).
+			Padding(0, 1).
+			Render(m.cfgInput.View()),
+	}
+	return m.modalStyle(width).Render(strings.Join(lines, "\n"))
 }
 
 func prettyElapsed(d time.Duration) string {
@@ -792,8 +1029,8 @@ func trimMiddle(s string, maxLen int) string {
 	return s[:left] + "…" + s[len(s)-right:]
 }
 
-func (m model) viewConfig() string {
-	outerWidth := min(120, max(44, m.termWidth-6))
+func (m model) viewConfig(width, height int) string {
+	outerWidth := min(120, max(44, width-2))
 	wide := outerWidth >= 96
 	gap := 2
 	leftW := outerWidth
@@ -824,47 +1061,6 @@ func (m model) viewConfig() string {
 		configRow(0, "scan location", m.cfg.DefaultScanPath, "↵ change", leftInnerW),
 		configRow(1, "theme", m.cfg.Theme, "↵ select", leftInnerW),
 	}
-
-	if m.cfgPathPicker {
-		opts := []string{m.theme.Title.Render("SELECT LOCATION"), m.theme.Muted.Render("esc cancel")}
-		for i, p := range m.pathOptions {
-			label := p
-			if p == "__custom__" {
-				label = "Custom path..."
-			}
-			prefix := "  "
-			st := m.theme.Text
-			if i == m.cfgPathCursor {
-				prefix = "➜ "
-				st = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SelectBG).Bold(true)
-			}
-			opts = append(opts, st.Render(prefix+trimMiddle(label, max(12, leftInnerW-4))))
-		}
-		leftRows = append(leftRows, m.panelStyle().Width(leftInnerW).Render(strings.Join(opts, "\n")))
-	}
-
-	if m.cfgThemePicker {
-		opts := []string{m.theme.Title.Render("SELECT THEME"), m.theme.Muted.Render("esc cancel")}
-		for i, th := range m.themes {
-			prefix := "  "
-			st := m.theme.Text
-			if i == m.cfgThemeCursor {
-				prefix = "➜ "
-				st = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SelectBG).Bold(true)
-			}
-			opts = append(opts, st.Render(prefix+th))
-		}
-		leftRows = append(leftRows, m.panelStyle().Width(leftInnerW).Render(strings.Join(opts, "\n")))
-	}
-
-	if m.cfgInputActive && m.cfgInputTarget == "scan" {
-		leftRows = append(leftRows, lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(m.theme.Input).
-			Padding(0, 1).
-			Width(leftInnerW).
-			Render(m.cfgInput.View()))
-	}
 	leftPanel := strings.Join(leftRows, "\n\n")
 
 	rightRows := []string{m.theme.Title.Render("EXCLUDE PATTERNS")}
@@ -879,19 +1075,11 @@ func (m model) viewConfig() string {
 		exLines = append(exLines, st.Render(row))
 	}
 	rightRows = append(rightRows, m.panelStyle().Width(rightInnerW).Render(strings.Join(exLines, "\n")))
-	if m.cfgInputActive && m.cfgInputTarget == "exclude" {
-		rightRows = append(rightRows, lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(m.theme.Input).
-			Padding(0, 1).
-			Width(rightInnerW).
-			Render(m.cfgInput.View()))
-	}
 	rightRows = append(rightRows, m.theme.Muted.Render("A add pattern • D remove selected"))
 	rightPanel := strings.Join(rightRows, "\n")
 
 	if !wide {
-		stacked := m.panelStyle().Width(outerWidth).Render(leftPanel + "\n\n" + rightPanel)
+		stacked := m.panelStyle().Width(outerWidth).Height(max(3, height-2)).Render(leftPanel + "\n\n" + rightPanel)
 		return stacked
 	}
 
@@ -901,7 +1089,7 @@ func (m model) viewConfig() string {
 		lipgloss.NewStyle().Width(gap).Render(""),
 		lipgloss.NewStyle().Width(rightW).Render(rightPanel),
 	)
-	return m.panelStyle().Width(outerWidth).Render(layout)
+	return m.panelStyle().Width(outerWidth).Height(max(3, height-2)).Render(layout)
 }
 
 func searchCmd(ctx context.Context, dbPath, query string, searchInPath bool) tea.Cmd {

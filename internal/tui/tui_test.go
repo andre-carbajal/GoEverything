@@ -163,6 +163,96 @@ func TestConfigViewRendersOnNarrowTerminal(t *testing.T) {
 	}
 }
 
+func TestWindowSizeMsgStoresWidthAndHeight(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+		AutoScanOnStart: false,
+	})
+
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
+	next := updated.(model)
+	if next.width != 100 || next.height != 40 {
+		t.Fatalf("expected size 100x40, got %dx%d", next.width, next.height)
+	}
+}
+
+func TestSearchViewRendersTableResults(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+		AutoScanOnStart: false,
+	})
+	m.mode = viewSearch
+	m.searchInput.SetValue("report")
+
+	updated, _ := m.Update(searchDoneMsg{
+		query: "report",
+		results: []db.Entry{{
+			Name: "report.pdf",
+			Path: "/tmp/docs/report.pdf",
+			Size: 2048,
+		}},
+	})
+	next := updated.(model)
+	out := next.View()
+	if !strings.Contains(out, "RESULTS") || !strings.Contains(out, "report.pdf") || !strings.Contains(out, "Directory") {
+		t.Fatalf("expected table results in search view, got:\n%s", out)
+	}
+}
+
+func TestConfigModalReplacesCentralContent(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+		AutoScanOnStart: false,
+	})
+	m.mode = viewConfig
+	m.modal = themeModal
+
+	out := m.View()
+	if !strings.Contains(out, "SELECT THEME") {
+		t.Fatalf("expected centered theme modal, got:\n%s", out)
+	}
+	if strings.Contains(out, "SETTINGS") {
+		t.Fatalf("expected modal to replace config content, got:\n%s", out)
+	}
+}
+
+func TestFullScreenFrameRendersBorder(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+		AutoScanOnStart: false,
+	})
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 72, Height: 24})
+	next := updated.(model)
+
+	out := next.View()
+	if !strings.Contains(out, "╭") || !strings.Contains(out, "╯") {
+		t.Fatalf("expected full-screen frame border, got:\n%s", out)
+	}
+	if strings.Contains(out, "████████") {
+		t.Fatalf("expected compact header on narrow terminal, got full ascii header")
+	}
+}
+
 func TestMenuHeaderFallsBackToCompactWhenTerminalIsNarrow(t *testing.T) {
 	t.Parallel()
 
