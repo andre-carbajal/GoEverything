@@ -12,6 +12,9 @@ import (
 )
 
 const (
+	DeleteModeTrash     = "trash"
+	DeleteModePermanent = "permanent"
+
 	defaultTheme = "tokyonight"
 	homeToken    = "~"
 )
@@ -21,6 +24,7 @@ type Config struct {
 	DefaultScanPath string   `json:"default_scan_path"`
 	Excludes        []string `json:"excludes"`
 	Theme           string   `json:"theme"`
+	DeleteMode      string   `json:"delete_mode"`
 	AutoScanOnStart bool     `json:"auto_scan_on_start"`
 }
 
@@ -114,6 +118,7 @@ func defaults() Config {
 		DefaultScanPath: homeToken,
 		Excludes:        scanner.DefaultExcludes(),
 		Theme:           defaultTheme,
+		DeleteMode:      DeleteModeTrash,
 		AutoScanOnStart: true,
 	}
 }
@@ -131,6 +136,7 @@ func fromLegacy(old legacyConfig) Config {
 		DBPath:          old.DBPath,
 		Excludes:        old.Excludes,
 		Theme:           old.Theme,
+		DeleteMode:      DeleteModeTrash,
 		AutoScanOnStart: old.AutoScanOnStart,
 		DefaultScanPath: homeToken,
 	}
@@ -159,6 +165,12 @@ func (c *Config) normalize() {
 	}
 	if c.Theme == "" {
 		c.Theme = defaultTheme
+	}
+	switch strings.ToLower(strings.TrimSpace(c.DeleteMode)) {
+	case DeleteModePermanent:
+		c.DeleteMode = DeleteModePermanent
+	default:
+		c.DeleteMode = DeleteModeTrash
 	}
 }
 

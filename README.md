@@ -54,12 +54,16 @@ brew install goeverything
 ge
 ```
 
+The TUI scans your configured location first, then opens the search screen.
+If the startup scan fails or is canceled, it opens settings so you can adjust the scan location or excludes.
+
 Useful shortcuts:
+- `Space` show/hide startup scan progress
 - `/` focus search input
-- `Ctrl+P` toggle path filtering
+- `Ctrl+S` open settings
 - `Ctrl+G` scan now
 - `Ctrl+X` stop scan
-- `q` quit
+- `Ctrl+Q` quit
 
 ### 2) Check default roots
 
@@ -90,7 +94,7 @@ ge search -q "*report*" --format json
 ge scan --root "$HOME"
 ```
 
-### Find files by name/path/ext
+### Find files by name/ext
 
 ```bash
 # By name/query
@@ -98,12 +102,6 @@ ge search -q invoice
 
 # By extension
 ge search -q report --ext pdf
-
-# Path-aware search
-ge search -q project --in-path
-
-# Wildcard path filter (implies --in-path)
-ge search -q go --path-query "*projects/go*"
 
 # Only files or only directories
 ge search -q docs --only-files
@@ -140,7 +138,7 @@ Example `~/.config/ge/config.json`:
 ```json
 {
   "default_scan_path": "~",
-  "auto_scan_on_start": false,
+  "auto_scan_on_start": true,
   "theme": "tokyonight",
   "excludes": [".git", "node_modules", "Library/Caches/*"]
 }
@@ -148,7 +146,7 @@ Example `~/.config/ge/config.json`:
 
 Notes:
 - `default_scan_path`: default root when you do not pass `--root`
-- `auto_scan_on_start`: scan automatically on app start
+- `auto_scan_on_start`: legacy field; the TUI now always runs its startup scan before opening search
 - `excludes`: ignore names or root-relative glob patterns
 
 ---

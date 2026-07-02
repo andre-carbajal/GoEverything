@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/table"
@@ -25,7 +26,8 @@ import (
 type viewMode int
 
 const (
-	viewMenu viewMode = iota
+	viewStartup viewMode = iota
+	viewMenu
 	viewSearch
 	viewConfig
 )
@@ -37,6 +39,7 @@ const (
 	pathModal
 	themeModal
 	excludeInputModal
+	deleteConfirmModal
 )
 
 type searchDoneMsg struct {
@@ -66,6 +69,59 @@ type debounceSearchMsg struct {
 	query string
 }
 
+type scanProgressTickMsg struct {
+	session int
+}
+
+type deleteResultDoneMsg struct {
+	index int
+	entry db.Entry
+	total int64
+	err   error
+}
+
+type hitbox struct {
+	x int
+	y int
+	w int
+	h int
+}
+
+type scanProgressSource struct {
+	mu       sync.Mutex
+	session  int
+	progress scanner.Progress
+}
+
+func newScanProgressSource() *scanProgressSource {
+	return &scanProgressSource{}
+}
+
+func (s *scanProgressSource) reset(session int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.session = session
+	s.progress = scanner.Progress{}
+}
+
+func (s *scanProgressSource) update(session int, progress scanner.Progress) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.session != session {
+		return
+	}
+	s.progress = progress
+}
+
+func (s *scanProgressSource) snapshot(session int) (scanner.Progress, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.session != session {
+		return scanner.Progress{}, false
+	}
+	return s.progress, true
+}
+
 type model struct {
 	ctx context.Context
 
@@ -78,14 +134,16 @@ type model struct {
 	menu       []string
 	menuCursor int
 
-	searchInput  textinput.Model
-	searchTable  table.Model
-	searchSeq    int
-	searchRes    []db.Entry
-	searchCur    int
-	searchInPath bool
+	searchInput textinput.Model
+	searchTable table.Model
+	searchSeq   int
+	searchRes   []db.Entry
+	searchCur   int
 
 	searchListFocus bool
+	deleteIndex     int
+	deleteTarget    db.Entry
+	hasDeleteTarget bool
 
 	cfgCursor      int
 	cfgInput       textinput.Model
@@ -105,11 +163,16 @@ type model struct {
 	err                  error
 	scanCancel           context.CancelFunc
 	startupScanAttempted bool
+	showScanProgress     bool
+	scanProgress         scanner.Progress
+	scanSession          int
+	scanProgressSource   *scanProgressSource
+	activeScanLabel      string
 }
 
 func Run(ctx context.Context, cfg config.Config) error {
 	m := newModel(ctx, cfg)
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	_, err := p.Run()
 	return err
 }
@@ -133,7 +196,7 @@ func newModel(ctx context.Context, cfg config.Config) model {
 		cfg:         cfg,
 		width:       120,
 		height:      36,
-		mode:        viewMenu,
+		mode:        viewStartup,
 		modal:       noModal,
 		menu:        []string{"Search", "Scan/Re-index", "Config"},
 		searchInput: searchInput,
@@ -141,7 +204,9 @@ func newModel(ctx context.Context, cfg config.Config) model {
 		theme:       themeByName(cfg.Theme),
 		themes:      []string{"tokyonight", "catppuccin", "groovbox"},
 		pathOptions: availablePathOptions(),
-		status:      "ready",
+		status:      "preparing initial scan",
+
+		scanProgressSource: newScanProgressSource(),
 	}
 	m.searchTable = newSearchTable(m.theme)
 	m.resizeComponents()
@@ -206,7 +271,7 @@ func (m model) contentHeight() int {
 	if m.mode == viewMenu {
 		headerH += lipgloss.Height(m.renderLogo()) + 1
 	}
-	footerH := lipgloss.Height(m.renderStatus()) + lipgloss.Height(m.renderHelp()) + 1
+	footerH := lipgloss.Height(m.renderError()) + lipgloss.Height(m.renderHelp()) + 1
 	return max(3, bodyH-headerH-footerH-2)
 }
 
@@ -226,20 +291,7 @@ func (m *model) resizeComponents() {
 func (m *model) syncSearchTableRows() {
 	rows := make([]table.Row, 0, len(m.searchRes))
 	for _, entry := range m.searchRes {
-		kind := "file"
-		if entry.IsDir {
-			kind = "dir"
-		}
-		sizeText := "-"
-		if !entry.IsDir {
-			sizeText = fmt.Sprintf("%.1f KB", float64(entry.Size)/1024)
-		}
-		rows = append(rows, table.Row{
-			kind,
-			entry.Name,
-			filepath.Dir(entry.Path),
-			sizeText,
-		})
+		rows = append(rows, table.Row(searchEntryValues(entry)))
 	}
 	m.searchTable.SetRows(rows)
 	if len(rows) == 0 {
@@ -253,6 +305,47 @@ func (m *model) syncSearchTableRows() {
 	m.searchTable.SetCursor(m.searchCur)
 }
 
+func (m model) focusSearchView() model {
+	m.mode = viewSearch
+	m.searchListFocus = false
+	m.searchInput.Focus()
+	m.searchTable.Blur()
+	return m
+}
+
+func (m model) openSettingsView() model {
+	m.mode = viewConfig
+	m.searchListFocus = false
+	m.searchInput.Blur()
+	m.searchTable.Blur()
+	return m
+}
+
+func (m model) settingsButtonHitbox() hitbox {
+	topbarH := lipgloss.Height(m.renderTopBar())
+	return hitbox{
+		x: max(0, m.width-24),
+		y: 1 + topbarH + 1,
+		w: 22,
+		h: 3,
+	}
+}
+
+func (h hitbox) contains(x, y int) bool {
+	return x >= h.x && x < h.x+h.w && y >= h.y && y < h.y+h.h
+}
+
+func (m model) settingsButtonClicked(msg tea.MouseMsg) bool {
+	if m.mode != viewSearch {
+		return false
+	}
+	ev := tea.MouseEvent(msg)
+	if ev.Button != tea.MouseButtonLeft || ev.Action != tea.MouseActionPress {
+		return false
+	}
+	return m.settingsButtonHitbox().contains(ev.X, ev.Y)
+}
+
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -264,15 +357,20 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case countDoneMsg:
 		if msg.err == nil {
 			m.totalIndexed = msg.total
+		} else {
+			m.err = msg.err
 		}
-		if msg.err == nil && !m.busy && !m.startupScanAttempted {
+		if !m.busy && !m.startupScanAttempted {
 			roots, err := defaultScanRoots(m.cfg)
 			if err != nil {
 				m.err = err
+				m.status = "initial scan failed"
+				m.startupScanAttempted = true
+				m = m.openSettingsView()
 				return m, nil
 			}
 			m.startupScanAttempted = true
-			m.status = "scanning"
+			m.status = "initial scan in progress…"
 			return m.startScanCmd(roots, "initial-scan", false)
 		}
 		return m, nil
@@ -295,13 +393,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if errors.Is(msg.err, context.Canceled) {
 			m.err = nil
 			m.status = "scan canceled"
+			m = m.openSettingsView()
 			return m, countCmd(m.ctx, m.cfg.DBPath)
 		}
 		m.err = msg.err
 		if msg.err == nil {
 			m.status = fmt.Sprintf("re-index done: scanned=%d indexed=%d", msg.metrics.Scanned, msg.metrics.Indexed)
+			m = m.focusSearchView()
 		} else {
 			m.status = "re-index failed"
+			m = m.openSettingsView()
 		}
 		return m, countCmd(m.ctx, m.cfg.DBPath)
 
@@ -309,16 +410,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.scanCancel = nil
 		m.busy = false
 		m.lastMetrics = msg.metrics
+		startup := msg.label == "initial-scan"
+		manual := msg.label == "manual-scan"
 		if errors.Is(msg.err, context.Canceled) {
 			m.err = nil
 			m.status = "scan canceled"
+			if startup || manual {
+				m = m.openSettingsView()
+			}
 			return m, countCmd(m.ctx, m.cfg.DBPath)
 		}
 		m.err = msg.err
 		if msg.err == nil {
 			m.status = fmt.Sprintf("%s done: scanned=%d indexed=%d", msg.label, msg.metrics.Scanned, msg.metrics.Indexed)
+			if startup || manual {
+				m = m.focusSearchView()
+			}
 		} else {
 			m.status = msg.label + " failed"
+			if startup || manual {
+				m = m.openSettingsView()
+			}
 		}
 		return m, countCmd(m.ctx, m.cfg.DBPath)
 
@@ -330,15 +442,52 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.searchRes = nil
 			return m, nil
 		}
-		return m, searchCmd(m.ctx, m.cfg.DBPath, msg.query, m.searchInPath)
+		return m, searchCmd(m.ctx, m.cfg.DBPath, msg.query)
+
+	case scanProgressTickMsg:
+		if msg.session != m.scanSession || !m.busy || m.scanProgressSource == nil {
+			return m, nil
+		}
+		if progress, ok := m.scanProgressSource.snapshot(msg.session); ok {
+			m.scanProgress = progress
+		}
+		return m, scanProgressTickCmd(msg.session)
+
+	case deleteResultDoneMsg:
+		m.err = msg.err
+		if msg.err != nil {
+			m.status = "delete failed"
+			return m, nil
+		}
+		m.removeDeletedResult(msg.entry)
+		m.totalIndexed = msg.total
+		m.status = "result deleted"
+		return m, nil
+
+	case tea.MouseMsg:
+		if m.settingsButtonClicked(msg) {
+			m = m.openSettingsView()
+			return m, nil
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+q":
 			return m, tea.Quit
 		}
 		if m.modal != noModal {
 			return m.handleModalKey(msg)
+		}
+		if m.mode == viewStartup {
+			switch msg.String() {
+			case "ctrl+x":
+			case " ", "space":
+				m.showScanProgress = !m.showScanProgress
+				return m, nil
+			default:
+				return m, nil
+			}
 		}
 		switch msg.String() {
 		case "ctrl+x":
@@ -355,20 +504,27 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 				m.status = "manual scan in progress…"
+				m.mode = viewStartup
 				return m.startScanCmd(roots, "manual-scan", false)
 			}
-		case "ctrl+p":
+		case "ctrl+s":
 			if m.mode == viewSearch {
-				m.searchInPath = !m.searchInPath
-				m.searchSeq++
-				return m, debounceCmd(m.searchSeq, m.searchInput.Value())
+				m = m.openSettingsView()
+				return m, nil
 			}
 		case "esc":
-			if m.mode != viewMenu {
-				m.mode = viewMenu
+			if m.mode == viewConfig {
+				m = m.focusSearchView()
+				return m, nil
+			}
+			if m.mode == viewMenu {
+				m = m.focusSearchView()
 				return m, nil
 			}
 		case "/":
+			if m.mode == viewStartup {
+				return m, nil
+			}
 			if m.mode != viewSearch {
 				m.mode = viewSearch
 			}
@@ -385,6 +541,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateSearch(msg)
 		case viewConfig:
 			return m.updateConfig(msg)
+		case viewStartup:
+			return m, nil
 		}
 	}
 
@@ -448,6 +606,15 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, openCmd(path, true)
 			}
 			return m, nil
+		case "d":
+			if len(m.searchRes) > 0 {
+				m.searchCur = min(max(0, m.searchTable.Cursor()), len(m.searchRes)-1)
+				m.deleteIndex = m.searchCur
+				m.deleteTarget = m.searchRes[m.searchCur]
+				m.hasDeleteTarget = true
+				m.modal = deleteConfirmModal
+			}
+			return m, nil
 		}
 		var cmd tea.Cmd
 		m.searchTable, cmd = m.searchTable.Update(msg)
@@ -463,7 +630,7 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	totalRows := 2 + len(m.cfg.Excludes) // 0 scan,1 theme,2.. excludes
+	totalRows := 3 + len(m.cfg.Excludes) // 0 scan,1 theme,2 delete mode,3.. excludes
 	maxCursor := totalRows - 1
 	switch msg.String() {
 	case "j", "down":
@@ -490,14 +657,21 @@ func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				idx = 0
 			}
 			m.cfgThemeCursor = idx
+		case 2:
+			m.cfg.DeleteMode = nextDeleteMode(m.cfg.DeleteMode)
+			if err := config.Save(m.cfg); err != nil {
+				m.err = err
+			} else {
+				m.status = "delete mode updated"
+			}
 		}
 	case "d":
-		exIdx := m.cfgCursor - 2
+		exIdx := m.cfgCursor - 3
 		if exIdx < 0 || exIdx >= len(m.cfg.Excludes) {
 			return m, nil
 		}
 		m.cfg.Excludes = append(m.cfg.Excludes[:exIdx], m.cfg.Excludes[exIdx+1:]...)
-		m.cfgCursor = min(m.cfgCursor, 1+max(0, len(m.cfg.Excludes)))
+		m.cfgCursor = min(m.cfgCursor, 2+max(0, len(m.cfg.Excludes)))
 		if len(m.cfg.Excludes) == 0 {
 			m.cfg.Excludes = scanner.DefaultExcludes()
 		}
@@ -518,6 +692,8 @@ func (m model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleThemeModalKey(msg)
 	case excludeInputModal:
 		return m.handleExcludeInputModalKey(msg)
+	case deleteConfirmModal:
+		return m.handleDeleteConfirmModalKey(msg)
 	default:
 		return m, nil
 	}
@@ -529,6 +705,9 @@ func (m model) closeModal() model {
 	m.cfgInputTarget = ""
 	m.cfgInput.Blur()
 	m.cfgInput.SetValue("")
+	m.hasDeleteTarget = false
+	m.deleteIndex = 0
+	m.deleteTarget = db.Entry{}
 	return m
 }
 
@@ -625,6 +804,24 @@ func (m model) handleExcludeInputModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+func (m model) handleDeleteConfirmModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "enter", "y":
+		if !m.hasDeleteTarget {
+			return m.closeModal(), nil
+		}
+		entry := m.deleteTarget
+		index := m.deleteIndex
+		m = m.closeModal()
+		m.status = "deleting result..."
+		return m, deleteResultCmd(m.ctx, m.cfg, entry, index)
+	case "esc", "n":
+		m.status = "delete canceled"
+		return m.closeModal(), nil
+	}
+	return m, nil
+}
+
 func (m model) saveScanPath(value string) (model, error) {
 	root, err := config.ExpandPath(value)
 	if err != nil {
@@ -645,6 +842,32 @@ func (m model) saveScanPath(value string) (model, error) {
 	return m, nil
 }
 
+func (m *model) removeDeletedResult(entry db.Entry) {
+	if len(m.searchRes) == 0 {
+		m.syncSearchTableRows()
+		return
+	}
+	clean := filepath.Clean(entry.Path)
+	filtered := m.searchRes[:0]
+	for _, res := range m.searchRes {
+		resPath := filepath.Clean(res.Path)
+		remove := resPath == clean
+		if entry.IsDir && strings.HasPrefix(resPath, clean+string(os.PathSeparator)) {
+			remove = true
+		}
+		if !remove {
+			filtered = append(filtered, res)
+		}
+	}
+	m.searchRes = filtered
+	if len(m.searchRes) == 0 {
+		m.searchCur = 0
+	} else if m.searchCur >= len(m.searchRes) {
+		m.searchCur = len(m.searchRes) - 1
+	}
+	m.syncSearchTableRows()
+}
+
 func (m model) View() string {
 	m.resizeComponents()
 	return m.renderFrame()
@@ -654,20 +877,38 @@ func (m model) renderFrame() string {
 	screenW, screenH := m.screenSize()
 	bodyW, bodyH := m.bodySize()
 
+	if m.mode == viewStartup {
+		body := lipgloss.NewStyle().
+			Width(bodyW).
+			Height(bodyH).
+			Render(m.renderContent(bodyW, bodyH))
+
+		return lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(m.theme.Border).
+			Padding(0, 1).
+			Width(screenW - 2).
+			Height(screenH - 2).
+			Render(body)
+	}
+
 	parts := make([]string, 0, 5)
 	if m.mode == viewMenu {
 		parts = append(parts, m.renderLogo())
 	}
 	parts = append(parts, m.renderTopBar())
 
-	status := m.renderStatus()
 	help := m.renderHelp()
 	contentH := m.contentHeight()
 	content := m.renderContent(bodyW, contentH)
 	if m.modal != noModal {
 		content = m.renderModal(bodyW, contentH)
 	}
-	parts = append(parts, content, status, help)
+	parts = append(parts, content)
+	if errLine := m.renderError(); errLine != "" {
+		parts = append(parts, errLine)
+	}
+	parts = append(parts, help)
 
 	body := lipgloss.JoinVertical(lipgloss.Left, parts...)
 	body = lipgloss.NewStyle().Width(bodyW).Height(bodyH).Render(body)
@@ -684,6 +925,8 @@ func (m model) renderFrame() string {
 func (m model) renderContent(width, height int) string {
 	var content string
 	switch m.mode {
+	case viewStartup:
+		content = m.viewStartup(width, height)
 	case viewMenu:
 		content = m.viewMenu(width)
 	case viewSearch:
@@ -694,26 +937,24 @@ func (m model) renderContent(width, height int) string {
 	return lipgloss.Place(width, height, lipgloss.Left, lipgloss.Top, content)
 }
 
-func (m model) renderStatus() string {
-	maxWidth := max(20, m.width-6)
+func (m model) renderError() string {
 	if m.err != nil {
+		maxWidth := max(20, m.width-6)
 		return m.theme.Err.Render(trimMiddle("error: "+m.err.Error(), maxWidth))
 	}
-	status := "status: " + m.status
-	if m.busy {
-		status = "status: scanning"
-	}
-	return m.theme.Muted.Render(trimMiddle(status, maxWidth))
+	return ""
 }
 
 func (m model) renderHelp() string {
-	keys := "j/k move • enter select • ctrl+g scan now • ctrl+x stop scan • esc back • q quit"
+	keys := "j/k move • enter select • ctrl+g scan now • ctrl+x stop scan • esc back • ctrl+q quit"
 	if m.modal != noModal {
-		keys = "j/k move • enter select • esc close modal • q quit"
+		keys = "j/k move • enter select • esc close modal • ctrl+q quit"
+	} else if m.mode == viewStartup {
+		keys = "space progress • ctrl+x cancel • ctrl+q quit"
 	} else if m.mode == viewConfig {
-		keys = "j/k move • enter select/edit • a add exclude • d remove exclude • ctrl+g scan now • esc back • q quit"
+		keys = "j/k move • enter select/edit/toggle • a add exclude • d remove exclude • ctrl+g scan now • esc search • ctrl+q quit"
 	} else if m.mode == viewSearch {
-		keys = "tab focus input/list • j/k move list • enter open folder • / focus search • ctrl+p toggle path filter • ctrl+g scan now • ctrl+x stop scan • esc back • q quit"
+		keys = "ctrl+s settings • tab focus input/list • enter open folder • d delete • / focus search • ctrl+g scan now • ctrl+q quit"
 	}
 	return m.theme.Muted.Render(trimMiddle("keys: "+keys, max(20, m.width-6)))
 }
@@ -862,6 +1103,53 @@ func (m model) viewMenu(width int) string {
 	return m.panelStyle().Width(max(32, min(60, width-4))).Render(strings.Join(lines, "\n\n"))
 }
 
+func (m model) viewStartup(width, height int) string {
+	message := "Scanning index…"
+	switch m.activeScanLabel {
+	case "initial-scan":
+		message = "Scanning before search opens…"
+	case "reindex":
+		message = "Re-indexing…"
+	}
+	if !m.startupScanAttempted && !m.busy {
+		message = "Preparing initial scan…"
+	}
+	lines := []string{
+		m.theme.Highlight.Render(message),
+		m.theme.Muted.Render("Press Space for progress."),
+	}
+	cardHeight := 5
+	if m.showScanProgress {
+		p := m.scanProgress
+		current := "waiting for first path…"
+		if strings.TrimSpace(p.CurrentPath) != "" {
+			current = trimMiddle(p.CurrentPath, max(18, min(86, width-16)))
+		}
+		lines = append(lines,
+			"",
+			m.theme.Title.Render("PROGRESS"),
+			fmt.Sprintf("scanned: %d", p.Scanned),
+			fmt.Sprintf("indexed: %d", p.Indexed),
+			fmt.Sprintf("skipped: %d", p.Skipped),
+			fmt.Sprintf("elapsed: %s", prettyDuration(p.Elapsed)),
+			fmt.Sprintf("speed: %.1f files/s", p.FilesPerSecond),
+			m.theme.Muted.Render("current: "+current),
+			m.theme.Muted.Render("Press Space to hide progress."),
+		)
+		cardHeight = 14
+	}
+
+	card := m.panelStyle().
+		Width(max(32, min(78, width-4))).
+		Height(max(3, min(cardHeight, height-2))).
+		Render(strings.Join(lines, "\n"))
+	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, card)
+}
+
+func (m model) settingsButtonView() string {
+	return m.badgeStyle().Render("⚙ Settings [Ctrl+S]")
+}
+
 func (m model) viewSearch(width, height int) string {
 	var lines []string
 	chip := func(s string, active bool) string {
@@ -880,10 +1168,14 @@ func (m model) viewSearch(width, height int) string {
 		m.theme.Muted.Render(" in "),
 		chip(m.cfg.DefaultScanPath, true),
 	)
-	if m.searchInPath {
-		top = lipgloss.JoinHorizontal(lipgloss.Center, top, " ", chip("path-filter", true))
+	settingsButton := m.settingsButtonView()
+	topAvailable := max(20, width-8)
+	spacerW := max(1, topAvailable-lipgloss.Width(top)-lipgloss.Width(settingsButton))
+	topRow := lipgloss.JoinHorizontal(lipgloss.Center, top, strings.Repeat(" ", spacerW), settingsButton)
+	if lipgloss.Width(topRow) > topAvailable {
+		topRow = lipgloss.JoinHorizontal(lipgloss.Center, m.theme.Highlight.Render("search"), " ", settingsButton)
 	}
-	lines = append(lines, top)
+	lines = append(lines, topRow)
 
 	searchBox := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -904,7 +1196,7 @@ func (m model) viewSearch(width, height int) string {
 			tableTitle = m.theme.Highlight.Render("RESULTS")
 		}
 		lines = append(lines, tableTitle)
-		lines = append(lines, m.searchTable.View())
+		lines = append(lines, m.renderSearchResults())
 	}
 	card := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -916,6 +1208,87 @@ func (m model) viewSearch(width, height int) string {
 	return card
 }
 
+func (m model) renderSearchResults() string {
+	cols := m.searchTable.Columns()
+	tableW := max(searchColumnsWidth(cols), m.searchTable.Width())
+	header := m.renderSearchCells(cols, []string{"Type", "Name", "Directory", "Size"})
+	lines := []string{m.theme.Title.Render(padToWidth(header, tableW))}
+
+	if len(m.searchRes) == 0 {
+		return strings.Join(lines, "\n")
+	}
+
+	cursor := min(max(0, m.searchTable.Cursor()), len(m.searchRes)-1)
+	visibleRows := max(1, m.searchTable.Height())
+	start := 0
+	if cursor >= visibleRows {
+		start = cursor - visibleRows + 1
+	}
+	end := min(len(m.searchRes), start+visibleRows)
+	if end-start < visibleRows {
+		start = max(0, end-visibleRows)
+	}
+
+	for i := start; i < end; i++ {
+		row := padToWidth(m.renderSearchCells(cols, searchEntryValues(m.searchRes[i])), tableW)
+		if i == cursor {
+			row = lipgloss.NewStyle().
+				Background(m.theme.SelectBG).
+				Foreground(m.theme.SelectFG).
+				Bold(true).
+				Render(row)
+		} else {
+			row = m.theme.Text.Render(row)
+		}
+		lines = append(lines, row)
+	}
+	return strings.Join(lines, "\n")
+}
+
+func (m model) renderSearchCells(cols []table.Column, values []string) string {
+	cells := make([]string, 0, min(len(cols), len(values)))
+	for i, col := range cols {
+		if i >= len(values) || col.Width <= 0 {
+			continue
+		}
+		cells = append(cells, padToWidth(trimMiddle(values[i], col.Width), col.Width))
+	}
+	return strings.Join(cells, "")
+}
+
+func searchEntryValues(entry db.Entry) []string {
+	kind := "file"
+	if entry.IsDir {
+		kind = "dir"
+	}
+	sizeText := "-"
+	if !entry.IsDir {
+		sizeText = fmt.Sprintf("%.1f KB", float64(entry.Size)/1024)
+	}
+	return []string{kind, entry.Name, filepath.Dir(entry.Path), sizeText}
+}
+
+func searchColumnsWidth(cols []table.Column) int {
+	width := 0
+	for _, col := range cols {
+		if col.Width > 0 {
+			width += col.Width
+		}
+	}
+	return width
+}
+
+func padToWidth(s string, width int) string {
+	if width <= 0 {
+		return ""
+	}
+	current := lipgloss.Width(s)
+	if current >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-current)
+}
+
 func (m model) renderModal(width, height int) string {
 	var modal string
 	switch m.modal {
@@ -925,6 +1298,8 @@ func (m model) renderModal(width, height int) string {
 		modal = m.renderThemeModal(width)
 	case excludeInputModal:
 		modal = m.renderExcludeInputModal(width)
+	case deleteConfirmModal:
+		modal = m.renderDeleteConfirmModal(width)
 	default:
 		return m.renderContent(width, height)
 	}
@@ -1004,6 +1379,29 @@ func (m model) renderExcludeInputModal(width int) string {
 	return m.modalStyle(width).Render(strings.Join(lines, "\n"))
 }
 
+func (m model) renderDeleteConfirmModal(width int) string {
+	path := "(no selection)"
+	kind := "result"
+	if m.hasDeleteTarget {
+		path = m.deleteTarget.Path
+		if m.deleteTarget.IsDir {
+			kind = "folder"
+		} else {
+			kind = "file"
+		}
+	}
+	lines := []string{
+		m.theme.Title.Render("DELETE RESULT"),
+		m.theme.Warn.Render("This will delete the selected " + kind + "."),
+		"",
+		"mode: " + deleteModeLabel(m.cfg.DeleteMode),
+		"path: " + trimMiddle(path, max(18, min(66, width-18))),
+		"",
+		m.theme.Muted.Render("enter/y confirm • esc/n cancel"),
+	}
+	return m.modalStyle(width).Render(strings.Join(lines, "\n"))
+}
+
 func prettyElapsed(d time.Duration) string {
 	if d <= 0 {
 		return "just now"
@@ -1015,6 +1413,16 @@ func prettyElapsed(d time.Duration) string {
 		return fmt.Sprintf("%dm ago", int(d.Minutes()))
 	}
 	return fmt.Sprintf("%dh ago", int(d.Hours()))
+}
+
+func prettyDuration(d time.Duration) string {
+	if d <= 0 {
+		return "0s"
+	}
+	if d < time.Second {
+		return "<1s"
+	}
+	return d.Round(time.Second).String()
 }
 
 func trimMiddle(s string, maxLen int) string {
@@ -1060,13 +1468,14 @@ func (m model) viewConfig(width, height int) string {
 		m.theme.Title.Render("SETTINGS"),
 		configRow(0, "scan location", m.cfg.DefaultScanPath, "↵ change", leftInnerW),
 		configRow(1, "theme", m.cfg.Theme, "↵ select", leftInnerW),
+		configRow(2, "delete mode", deleteModeLabel(m.cfg.DeleteMode), "↵ toggle", leftInnerW),
 	}
 	leftPanel := strings.Join(leftRows, "\n\n")
 
 	rightRows := []string{m.theme.Title.Render("EXCLUDE PATTERNS")}
 	var exLines []string
 	for i, ex := range m.cfg.Excludes {
-		idx := i + 2
+		idx := i + 3
 		row := "◌ " + trimMiddle(ex, max(12, rightInnerW-6))
 		st := m.theme.Text
 		if m.cfgCursor == idx {
@@ -1092,7 +1501,21 @@ func (m model) viewConfig(width, height int) string {
 	return m.panelStyle().Width(outerWidth).Height(max(3, height-2)).Render(layout)
 }
 
-func searchCmd(ctx context.Context, dbPath, query string, searchInPath bool) tea.Cmd {
+func nextDeleteMode(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), config.DeleteModePermanent) {
+		return config.DeleteModeTrash
+	}
+	return config.DeleteModePermanent
+}
+
+func deleteModeLabel(mode string) string {
+	if strings.EqualFold(strings.TrimSpace(mode), config.DeleteModePermanent) {
+		return "Permanent"
+	}
+	return "Trash"
+}
+
+func searchCmd(ctx context.Context, dbPath, query string) tea.Cmd {
 	return func() tea.Msg {
 		store, err := db.Open(ctx, dbPath)
 		if err != nil {
@@ -1100,10 +1523,9 @@ func searchCmd(ctx context.Context, dbPath, query string, searchInPath bool) tea
 		}
 		defer store.Close()
 		res, err := store.SearchAdvanced(ctx, db.SearchOptions{
-			Query:        query,
-			SearchInPath: searchInPath,
-			Limit:        100,
-			Offset:       0,
+			Query:  query,
+			Limit:  100,
+			Offset: 0,
 		})
 		return searchDoneMsg{query: query, results: res, err: err}
 	}
@@ -1121,13 +1543,71 @@ func countCmd(ctx context.Context, dbPath string) tea.Cmd {
 	}
 }
 
+func deleteResultCmd(ctx context.Context, cfg config.Config, entry db.Entry, index int) tea.Cmd {
+	return func() tea.Msg {
+		if strings.TrimSpace(entry.Path) == "" {
+			return deleteResultDoneMsg{index: index, entry: entry, err: errors.New("path is required")}
+		}
+		isDir := entry.IsDir
+		info, statErr := os.Stat(entry.Path)
+		switch {
+		case statErr == nil:
+			isDir = info.IsDir()
+			if strings.EqualFold(cfg.DeleteMode, config.DeleteModePermanent) {
+				if err := os.RemoveAll(entry.Path); err != nil {
+					return deleteResultDoneMsg{index: index, entry: entry, err: err}
+				}
+			} else if err := moveToTrash(entry.Path); err != nil {
+				return deleteResultDoneMsg{index: index, entry: entry, err: err}
+			}
+		case errors.Is(statErr, os.ErrNotExist):
+			// The file already disappeared; keep the index consistent below.
+		default:
+			return deleteResultDoneMsg{index: index, entry: entry, err: statErr}
+		}
+		entry.IsDir = isDir
+
+		store, err := db.Open(ctx, cfg.DBPath)
+		if err != nil {
+			return deleteResultDoneMsg{index: index, entry: entry, err: err}
+		}
+		defer store.Close()
+
+		if isDir {
+			err = store.DeleteByPrefix(ctx, entry.Path)
+		} else {
+			err = store.DeleteByPath(ctx, entry.Path)
+		}
+		if err != nil {
+			return deleteResultDoneMsg{index: index, entry: entry, err: err}
+		}
+		total, err := store.Count(ctx)
+		return deleteResultDoneMsg{index: index, entry: entry, total: total, err: err}
+	}
+}
+
+func moveToTrash(path string) error {
+	script := `tell application "Finder" to delete POSIX file ` + appleScriptQuote(path)
+	return exec.Command("osascript", "-e", script).Run()
+}
+
+func appleScriptQuote(value string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value) + `"`
+}
+
 func debounceCmd(seq int, query string) tea.Cmd {
 	return tea.Tick(180*time.Millisecond, func(time.Time) tea.Msg {
 		return debounceSearchMsg{seq: seq, query: query}
 	})
 }
 
-func reindexCmd(ctx context.Context, cfg config.Config, roots []string) tea.Cmd {
+func scanProgressTickCmd(session int) tea.Cmd {
+	return tea.Tick(250*time.Millisecond, func(time.Time) tea.Msg {
+		return scanProgressTickMsg{session: session}
+	})
+}
+
+func reindexCmd(ctx context.Context, cfg config.Config, roots []string, progress func(scanner.Progress)) tea.Cmd {
 	return func() tea.Msg {
 		store, err := db.Open(ctx, cfg.DBPath)
 		if err != nil {
@@ -1139,17 +1619,18 @@ func reindexCmd(ctx context.Context, cfg config.Config, roots []string) tea.Cmd 
 			return reindexDoneMsg{err: err}
 		}
 		r := scanner.Runner{
-			Indexer: store,
-			Workers: scanner.DefaultWorkerCount(),
-			Batch:   2000,
-			Exclude: cfg.Excludes,
+			Indexer:  store,
+			Workers:  scanner.DefaultWorkerCount(),
+			Batch:    2000,
+			Exclude:  cfg.Excludes,
+			Progress: progress,
 		}
 		metrics, err := r.Scan(ctx, roots)
 		return reindexDoneMsg{metrics: metrics, err: watcher.WithPermissionHint(err)}
 	}
 }
 
-func scanRootsCmd(ctx context.Context, cfg config.Config, roots []string, label string) tea.Cmd {
+func scanRootsCmd(ctx context.Context, cfg config.Config, roots []string, label string, progress func(scanner.Progress)) tea.Cmd {
 	return func() tea.Msg {
 		store, err := db.Open(ctx, cfg.DBPath)
 		if err != nil {
@@ -1158,10 +1639,11 @@ func scanRootsCmd(ctx context.Context, cfg config.Config, roots []string, label 
 		defer store.Close()
 
 		r := scanner.Runner{
-			Indexer: store,
-			Workers: scanner.DefaultWorkerCount(),
-			Batch:   2000,
-			Exclude: cfg.Excludes,
+			Indexer:  store,
+			Workers:  scanner.DefaultWorkerCount(),
+			Batch:    2000,
+			Exclude:  cfg.Excludes,
+			Progress: progress,
 		}
 		metrics, err := r.Scan(ctx, roots)
 		return scanDoneMsg{metrics: metrics, err: watcher.WithPermissionHint(err), label: label}
@@ -1172,10 +1654,22 @@ func (m model) startScanCmd(roots []string, label string, reindex bool) (model, 
 	ctx, cancel := context.WithCancel(m.ctx)
 	m.scanCancel = cancel
 	m.busy = true
-	if reindex {
-		return m, reindexCmd(ctx, m.cfg, roots)
+	m.activeScanLabel = label
+	m.scanSession++
+	session := m.scanSession
+	m.scanProgress = scanner.Progress{}
+	m.showScanProgress = false
+	if m.scanProgressSource == nil {
+		m.scanProgressSource = newScanProgressSource()
 	}
-	return m, scanRootsCmd(ctx, m.cfg, roots, label)
+	m.scanProgressSource.reset(session)
+	progress := func(p scanner.Progress) {
+		m.scanProgressSource.update(session, p)
+	}
+	if reindex {
+		return m, tea.Batch(reindexCmd(ctx, m.cfg, roots, progress), scanProgressTickCmd(session))
+	}
+	return m, tea.Batch(scanRootsCmd(ctx, m.cfg, roots, label, progress), scanProgressTickCmd(session))
 }
 
 func openCmd(path string, reveal bool) tea.Cmd {

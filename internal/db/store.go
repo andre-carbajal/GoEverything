@@ -26,15 +26,13 @@ type Entry struct {
 }
 
 type SearchOptions struct {
-	Query        string
-	PathQuery    string
-	SearchInPath bool
-	Limit        int
-	Offset       int
-	OnlyDirs     bool
-	OnlyFiles    bool
-	Ext          string
-	Root         string
+	Query     string
+	Limit     int
+	Offset    int
+	OnlyDirs  bool
+	OnlyFiles bool
+	Ext       string
+	Root      string
 }
 
 type Store struct {
@@ -459,8 +457,7 @@ func (s *Store) Search(ctx context.Context, query string, limit, offset int) ([]
 
 func (s *Store) SearchAdvanced(ctx context.Context, opts SearchOptions) ([]Entry, error) {
 	query := strings.TrimSpace(opts.Query)
-	pathQuery := strings.TrimSpace(opts.PathQuery)
-	if query == "" && (!opts.SearchInPath || pathQuery == "") {
+	if query == "" {
 		return nil, nil
 	}
 	if opts.Limit <= 0 {
@@ -470,16 +467,8 @@ func (s *Store) SearchAdvanced(ctx context.Context, opts SearchOptions) ([]Entry
 		opts.Offset = 0
 	}
 
-	if pathQuery == "" && opts.SearchInPath {
-		pathQuery = query
-	}
-
-	if query == "" {
-		return s.searchByLike(ctx, "*", pathQuery, opts)
-	}
-
 	if strings.HasPrefix(query, "*") || strings.HasSuffix(query, "*") {
-		return s.searchByLike(ctx, query, pathQuery, opts)
+		return s.searchByLike(ctx, query, opts)
 	}
 
 	q := `
@@ -490,10 +479,6 @@ func (s *Store) SearchAdvanced(ctx context.Context, opts SearchOptions) ([]Entry
 		WHERE entries_fts MATCH ?`
 	args := []any{buildFTSQuery(query)}
 	q, args = applySearchFilters(q, args, opts)
-	if opts.SearchInPath && pathQuery != "" {
-		q += ` AND (CASE WHEN d.path = '/' THEN '/' || e.name ELSE d.path || '/' || e.name END) LIKE ?`
-		args = append(args, wildcardToLike(pathQuery))
-	}
 	q += `
 		ORDER BY
 			CASE
@@ -515,7 +500,7 @@ func (s *Store) SearchAdvanced(ctx context.Context, opts SearchOptions) ([]Entry
 	return scanEntries(rows, opts.Limit)
 }
 
-func (s *Store) searchByLike(ctx context.Context, query, pathQuery string, opts SearchOptions) ([]Entry, error) {
+func (s *Store) searchByLike(ctx context.Context, query string, opts SearchOptions) ([]Entry, error) {
 	nameLike := wildcardToLike(query)
 	if nameLike == "" {
 		nameLike = "%"
@@ -527,11 +512,6 @@ func (s *Store) searchByLike(ctx context.Context, query, pathQuery string, opts 
 		JOIN directories d ON d.id = e.dir_id
 		WHERE e.name LIKE ?`
 	args := []any{nameLike}
-
-	if opts.SearchInPath && pathQuery != "" {
-		q += ` AND (CASE WHEN d.path = '/' THEN '/' || e.name ELSE d.path || '/' || e.name END) LIKE ?`
-		args = append(args, wildcardToLike(pathQuery))
-	}
 
 	q, args = applySearchFilters(q, args, opts)
 	q += ` ORDER BY e.name ASC, d.path ASC LIMIT ? OFFSET ?`

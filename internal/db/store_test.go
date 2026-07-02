@@ -95,7 +95,7 @@ func TestStoreSearchAdvancedFiltersAndReindex(t *testing.T) {
 	}
 }
 
-func TestStoreSearchByPathRequiresExplicitFlag(t *testing.T) {
+func TestStoreSearchDoesNotMatchPathSegments(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
@@ -125,19 +125,6 @@ func TestStoreSearchByPathRequiresExplicitFlag(t *testing.T) {
 	}
 	if len(got) != 0 {
 		t.Fatalf("expected no default path hits, got: %+v", got)
-	}
-
-	got, err = store.SearchAdvanced(ctx, SearchOptions{
-		Query:        "main",
-		SearchInPath: true,
-		PathQuery:    "*projects/go*",
-		Limit:        10,
-	})
-	if err != nil {
-		t.Fatalf("search with explicit path filter: %v", err)
-	}
-	if len(got) != 1 || got[0].Path != "/Users/a/projects/go/main.go" {
-		t.Fatalf("unexpected explicit path-filter results: %+v", got)
 	}
 }
 

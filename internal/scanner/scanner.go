@@ -24,6 +24,8 @@ type Runner struct {
 	Workers int
 	Batch   int
 	Exclude []string
+
+	Progress func(Progress)
 }
 
 type Metrics struct {
@@ -32,6 +34,15 @@ type Metrics struct {
 	Skipped        int64
 	Elapsed        time.Duration
 	FilesPerSecond float64
+}
+
+type Progress struct {
+	Scanned        int64
+	Indexed        int64
+	Skipped        int64
+	Elapsed        time.Duration
+	FilesPerSecond float64
+	CurrentPath    string
 }
 
 func DefaultWorkerCount() int {
@@ -71,6 +82,29 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 		indexed int64
 		skipped int64
 	)
+	var currentPath atomic.Value
+
+	emitProgress := func() {
+		if r.Progress == nil {
+			return
+		}
+		elapsed := time.Since(start)
+		scannedNow := atomic.LoadInt64(&scanned)
+		progress := Progress{
+			Scanned:     scannedNow,
+			Indexed:     atomic.LoadInt64(&indexed),
+			Skipped:     atomic.LoadInt64(&skipped),
+			Elapsed:     elapsed,
+			CurrentPath: "",
+		}
+		if path, ok := currentPath.Load().(string); ok {
+			progress.CurrentPath = path
+		}
+		if elapsed > 0 {
+			progress.FilesPerSecond = float64(scannedNow) / elapsed.Seconds()
+		}
+		r.Progress(progress)
+	}
 
 	// Single writer goroutine: avoids concurrent SQLite writes (SQLITE_BUSY)
 	writerDone := make(chan struct{})
@@ -86,6 +120,7 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 			}
 			atomic.AddInt64(&indexed, int64(len(batch)))
 			batch = batch[:0]
+			emitProgress()
 			return nil
 		}
 
@@ -116,7 +151,9 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 		exclude := newExcludeMatcher(root, r.Exclude)
 		err := fastwalk.Walk(&fastwalk.Config{Follow: false, NumWorkers: workers}, root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
+				currentPath.Store(path)
 				atomic.AddInt64(&skipped, 1)
+				emitProgress()
 				return nil
 			}
 
@@ -124,7 +161,9 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 				if d.IsDir() {
 					return fastwalk.SkipDir
 				}
+				currentPath.Store(path)
 				atomic.AddInt64(&skipped, 1)
+				emitProgress()
 				return nil
 			}
 			select {
@@ -139,7 +178,9 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 				return nil
 			}
 
+			currentPath.Store(path)
 			atomic.AddInt64(&scanned, 1)
+			emitProgress()
 			entry := db.NewEntryFromPath(root, path, info.Size(), info.ModTime(), d.IsDir())
 
 			select {
@@ -175,6 +216,7 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 	if elapsed > 0 {
 		metrics.FilesPerSecond = float64(metrics.Scanned) / elapsed.Seconds()
 	}
+	emitProgress()
 
 	return metrics, nil
 }

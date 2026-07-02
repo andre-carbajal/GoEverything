@@ -33,8 +33,6 @@ type options struct {
 	SearchFormat string
 	SearchExt    string
 	SearchRoot   string
-	SearchInPath bool
-	PathQuery    string
 	OnlyFiles    bool
 	OnlyDirs     bool
 }
@@ -192,15 +190,13 @@ func newSearchCommand(opt *options) *cobra.Command {
 			defer store.Close()
 
 			searchOpts := db.SearchOptions{
-				Query:        opt.Query,
-				PathQuery:    opt.PathQuery,
-				SearchInPath: opt.SearchInPath,
-				Limit:        opt.Limit,
-				Offset:       opt.Offset,
-				OnlyDirs:     opt.OnlyDirs,
-				OnlyFiles:    opt.OnlyFiles,
-				Ext:          opt.SearchExt,
-				Root:         opt.SearchRoot,
+				Query:     opt.Query,
+				Limit:     opt.Limit,
+				Offset:    opt.Offset,
+				OnlyDirs:  opt.OnlyDirs,
+				OnlyFiles: opt.OnlyFiles,
+				Ext:       opt.SearchExt,
+				Root:      opt.SearchRoot,
 			}
 
 			results, err := store.SearchAdvanced(cmd.Context(), searchOpts)
@@ -226,17 +222,12 @@ func newSearchCommand(opt *options) *cobra.Command {
 	command.Flags().StringVar(&opt.SearchFormat, "format", "table", "Output format: table|json")
 	command.Flags().StringVar(&opt.SearchExt, "ext", "", "Filter by extension (example: go or .go)")
 	command.Flags().StringVar(&opt.SearchRoot, "root", "", "Filter results by indexed root")
-	command.Flags().BoolVar(&opt.SearchInPath, "in-path", false, "Enable explicit filtering by full path")
-	command.Flags().StringVar(&opt.PathQuery, "path-query", "", "Path filter pattern (supports * wildcard); implies --in-path")
 	command.Flags().BoolVar(&opt.OnlyFiles, "only-files", false, "Return only files")
 	command.Flags().BoolVar(&opt.OnlyDirs, "only-dirs", false, "Return only directories")
 	command.MarkFlagsMutuallyExclusive("only-files", "only-dirs")
 	command.PreRunE = func(_ *cobra.Command, _ []string) error {
-		if strings.TrimSpace(opt.PathQuery) != "" {
-			opt.SearchInPath = true
-		}
-		if strings.TrimSpace(opt.Query) == "" && strings.TrimSpace(opt.PathQuery) == "" {
-			return fmt.Errorf("at least one search term is required (--query or --path-query)")
+		if strings.TrimSpace(opt.Query) == "" {
+			return fmt.Errorf("at least one search term is required (--query)")
 		}
 		return nil
 	}
