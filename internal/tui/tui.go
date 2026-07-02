@@ -999,24 +999,16 @@ func (m model) renderTopBar() string {
 	scopeLen := max(8, innerWidth/4)
 	basePlain := fmt.Sprintf("◌ GoEverything %d indexed scope %s", m.totalIndexed, trimMiddle(m.cfg.DefaultScanPath, scopeLen))
 	lastPlain := "last scan " + prettyElapsed(m.lastMetrics.Elapsed)
-	statusPlain := "idle"
-	if m.busy {
-		statusPlain = "scanning"
-	}
 
 	lastView := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.Badge).
 		Padding(0, 1).
 		Render(m.theme.Muted.Render(lastPlain))
-	statusStyle := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(m.theme.Border).
-		Padding(0, 1).
-		Render(m.theme.Muted.Render(statusPlain))
+	statusView := ""
 	if m.busy {
-		statusText := m.theme.Highlight.Copy().Bold(true).Render("● " + statusPlain)
-		statusStyle = lipgloss.NewStyle().
+		statusText := m.theme.Highlight.Copy().Bold(true).Render("● scanning")
+		statusView = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(m.theme.BorderHi).
 			Padding(0, 1).
@@ -1024,11 +1016,19 @@ func (m model) renderTopBar() string {
 	}
 
 	mainView := m.theme.Header.Render(basePlain)
-	content := lipgloss.JoinHorizontal(lipgloss.Center, mainView, "  ", lastView, "  ", statusStyle)
+	contentParts := []string{mainView, "  ", lastView}
+	if statusView != "" {
+		contentParts = append(contentParts, "  ", statusView)
+	}
+	content := lipgloss.JoinHorizontal(lipgloss.Center, contentParts...)
 	if lipgloss.Width(content) > innerWidth-2 {
 		shortBase := trimMiddle(basePlain, max(12, innerWidth/3))
 		mainView = m.theme.Header.Render(shortBase)
-		content = lipgloss.JoinHorizontal(lipgloss.Center, mainView, "  ", statusStyle)
+		if statusView != "" {
+			content = lipgloss.JoinHorizontal(lipgloss.Center, mainView, "  ", statusView)
+		} else {
+			content = lipgloss.JoinHorizontal(lipgloss.Center, mainView, "  ", lastView)
+		}
 	}
 	if lipgloss.Width(content) > innerWidth-2 {
 		content = m.theme.Header.Render(trimMiddle(basePlain, max(10, innerWidth-4)))

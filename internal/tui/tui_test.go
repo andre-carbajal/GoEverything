@@ -691,6 +691,31 @@ func TestConfigViewShowsAndTogglesDeleteMode(t *testing.T) {
 	}
 }
 
+func TestTopBarHidesIdleStatusWhenNotBusy(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+		AutoScanOnStart: false,
+	})
+	m.mode = viewSearch
+	m.busy = false
+
+	out := m.renderTopBar()
+	if strings.Contains(out, "idle") {
+		t.Fatalf("did not expect idle status in top bar, got:\n%s", out)
+	}
+
+	m.busy = true
+	out = m.renderTopBar()
+	if !strings.Contains(out, "scanning") {
+		t.Fatalf("expected scanning status while busy, got:\n%s", out)
+	}
+}
+
 func TestWindowSizeMsgStoresWidthAndHeight(t *testing.T) {
 	t.Parallel()
 
