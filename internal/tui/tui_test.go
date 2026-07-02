@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -610,6 +611,191 @@ func TestEscFromConfigReturnsToSearch(t *testing.T) {
 	}
 }
 
+func mouseEventIn(box hitbox, action tea.MouseAction, button tea.MouseButton) tea.MouseMsg {
+	return tea.MouseMsg(tea.MouseEvent{
+		X:      box.x + max(0, box.w/2),
+		Y:      box.y + max(0, box.h/2),
+		Action: action,
+		Button: button,
+	})
+}
+
+func mouseEventAt(x, y int, action tea.MouseAction, button tea.MouseButton) tea.MouseMsg {
+	return tea.MouseMsg(tea.MouseEvent{
+		X:      x,
+		Y:      y,
+		Action: action,
+		Button: button,
+	})
+}
+
+func renderedLineForSearchRow(t *testing.T, m model, index int) int {
+	t.Helper()
+	needle := fmt.Sprintf("row-%02d", index)
+	for y, line := range strings.Split(m.View(), "\n") {
+		if strings.Contains(line, needle) {
+			return y
+		}
+	}
+	t.Fatalf("could not find rendered row %q in view:\n%s", needle, m.View())
+	return 0
+}
+
+func modelWithManySearchRows() model {
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+		DeleteMode:      config.DeleteModeTrash,
+		AutoScanOnStart: false,
+	})
+	m.mode = viewSearch
+	m.searchRes = make([]db.Entry, 24)
+	for i := range m.searchRes {
+		m.searchRes[i] = db.Entry{
+			Name: fmt.Sprintf("row-%02d", i),
+			Path: fmt.Sprintf("/tmp/search-row-%02d", i),
+			Size: int64(i + 1),
+		}
+	}
+	m.searchCur = 10
+	m.syncSearchTableRows()
+	return m
+}
+
+func TestMouseHoverTracksInteractiveTargetsWithoutActivating(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git", "node_modules"},
+		Theme:           "tokyonight",
+		AutoScanOnStart: false,
+	}
+
+	m := newModel(context.Background(), cfg)
+	m.mode = viewMenu
+	updated, _ := m.Update(mouseEventIn(m.menuCardHitbox(2), tea.MouseActionMotion, tea.MouseButtonNone))
+	next := updated.(model)
+	if next.hoveredMouse.kind != mouseTargetMenuCard || next.hoveredMouse.index != 2 {
+		t.Fatalf("expected menu card hover, got %#v", next.hoveredMouse)
+	}
+	if next.mode != viewMenu || next.menuCursor != 0 {
+		t.Fatalf("hover should not activate menu, mode=%v cursor=%d", next.mode, next.menuCursor)
+	}
+
+	m = newModel(context.Background(), cfg)
+	m.mode = viewConfig
+	m.cfgCursor = 0
+	updated, _ = m.Update(mouseEventIn(m.configRowHitbox(1), tea.MouseActionMotion, tea.MouseButtonNone))
+	next = updated.(model)
+	if next.hoveredMouse.kind != mouseTargetConfigRow || next.hoveredMouse.index != 1 {
+		t.Fatalf("expected config row hover, got %#v", next.hoveredMouse)
+	}
+	if next.cfgCursor != 0 || next.modal != noModal {
+		t.Fatalf("hover should not activate config, cursor=%d modal=%v", next.cfgCursor, next.modal)
+	}
+
+	m = newModel(context.Background(), cfg)
+	m.mode = viewSearch
+	m.searchRes = []db.Entry{
+		{Name: "a.txt", Path: "/tmp/a.txt"},
+		{Name: "b.txt", Path: "/tmp/b.txt"},
+	}
+	m.syncSearchTableRows()
+	updated, _ = m.Update(mouseEventIn(m.searchResultHitbox(1), tea.MouseActionMotion, tea.MouseButtonNone))
+	next = updated.(model)
+	if next.hoveredMouse.kind != mouseTargetSearchResult || next.hoveredMouse.index != 1 {
+		t.Fatalf("expected search result hover, got %#v", next.hoveredMouse)
+	}
+	if next.searchCur != 0 || next.searchListFocus {
+		t.Fatalf("hover should not select result, cursor=%d focus=%v", next.searchCur, next.searchListFocus)
+	}
+}
+
+func TestSearchResultHitboxesMatchRenderedRows(t *testing.T) {
+	t.Parallel()
+
+	m := modelWithManySearchRows()
+	layout := m.searchMouseLayout()
+	if layout.visibleStart == layout.visibleEnd {
+		t.Fatalf("expected visible search rows")
+	}
+
+	for i := layout.visibleStart; i < layout.visibleEnd; i++ {
+		renderedY := renderedLineForSearchRow(t, m, i)
+		box := m.searchResultHitbox(i)
+		if box.y != renderedY {
+			t.Fatalf("expected row %d hitbox y to match rendered line %d, got %d", i, renderedY, box.y)
+		}
+		target := m.resolveMouseTarget(layout.resultX+8, renderedY)
+		if target.kind != mouseTargetSearchResult || target.index != i {
+			t.Fatalf("expected rendered row %d to resolve to itself, got %#v", i, target)
+		}
+	}
+}
+
+func TestSearchResultMouseActionsUseRenderedRowCoordinates(t *testing.T) {
+	t.Parallel()
+
+	m := modelWithManySearchRows()
+	layout := m.searchMouseLayout()
+	row := layout.visibleStart + 3
+	x := layout.resultX + 8
+	y := renderedLineForSearchRow(t, m, row)
+
+	updated, cmd := m.Update(mouseEventAt(x, y, tea.MouseActionPress, tea.MouseButtonLeft))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatalf("did not expect open command on first rendered-row click")
+	}
+	if next.searchCur != row || next.searchTable.Cursor() != row {
+		t.Fatalf("expected rendered-row click to select row %d, searchCur=%d tableCursor=%d", row, next.searchCur, next.searchTable.Cursor())
+	}
+
+	updated, cmd = next.Update(mouseEventAt(x, y, tea.MouseActionPress, tea.MouseButtonLeft))
+	next = updated.(model)
+	if cmd == nil {
+		t.Fatalf("expected rendered-row double-click to return open command")
+	}
+
+	rightClickRow := layout.visibleStart + 1
+	y = renderedLineForSearchRow(t, next, rightClickRow)
+	updated, _ = next.Update(mouseEventAt(x, y, tea.MouseActionPress, tea.MouseButtonRight))
+	next = updated.(model)
+	if next.modal != deleteConfirmModal || next.deleteIndex != rightClickRow || next.deleteTarget.Name != fmt.Sprintf("row-%02d", rightClickRow) {
+		t.Fatalf("expected right-click on rendered row %d to target that row, modal=%v index=%d target=%q", rightClickRow, next.modal, next.deleteIndex, next.deleteTarget.Name)
+	}
+}
+
+func TestMouseLeftClickActivatesMenuAndConfigRows(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+		AutoScanOnStart: false,
+	})
+	m.mode = viewMenu
+	updated, _ := m.Update(mouseEventIn(m.menuCardHitbox(2), tea.MouseActionPress, tea.MouseButtonLeft))
+	next := updated.(model)
+	if next.mode != viewConfig || next.menuCursor != 2 {
+		t.Fatalf("expected menu config click to open config, mode=%v cursor=%d", next.mode, next.menuCursor)
+	}
+
+	m = newModel(context.Background(), m.cfg)
+	m.mode = viewConfig
+	updated, _ = m.Update(mouseEventIn(m.configRowHitbox(1), tea.MouseActionPress, tea.MouseButtonLeft))
+	next = updated.(model)
+	if next.modal != themeModal || next.cfgCursor != 1 {
+		t.Fatalf("expected theme row click to open theme modal, modal=%v cursor=%d", next.modal, next.cfgCursor)
+	}
+}
+
 func TestSearchSettingsMouseClickOpensConfig(t *testing.T) {
 	t.Parallel()
 
@@ -635,6 +821,89 @@ func TestSearchSettingsMouseClickOpensConfig(t *testing.T) {
 
 	if next.mode != viewConfig {
 		t.Fatalf("expected config mode after settings click, got %v", next.mode)
+	}
+}
+
+func TestSearchResultMouseClickDoubleClickAndRightClick(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+		DeleteMode:      config.DeleteModeTrash,
+		AutoScanOnStart: false,
+	})
+	m.mode = viewSearch
+	m.searchRes = []db.Entry{
+		{Name: "a.txt", Path: "/tmp/a.txt"},
+		{Name: "b.txt", Path: "/tmp/b.txt"},
+	}
+	m.syncSearchTableRows()
+
+	updated, cmd := m.Update(mouseEventIn(m.searchResultHitbox(1), tea.MouseActionPress, tea.MouseButtonLeft))
+	next := updated.(model)
+	if cmd != nil {
+		t.Fatalf("did not expect open command on first click")
+	}
+	if !next.searchListFocus || next.searchCur != 1 || next.searchTable.Cursor() != 1 {
+		t.Fatalf("expected first click to select row 1, focus=%v searchCur=%d tableCursor=%d", next.searchListFocus, next.searchCur, next.searchTable.Cursor())
+	}
+
+	updated, cmd = next.Update(mouseEventIn(next.searchResultHitbox(1), tea.MouseActionPress, tea.MouseButtonLeft))
+	next = updated.(model)
+	if cmd == nil {
+		t.Fatalf("expected double-click to return open command")
+	}
+
+	updated, _ = next.Update(mouseEventIn(next.searchResultHitbox(0), tea.MouseActionPress, tea.MouseButtonRight))
+	next = updated.(model)
+	if next.modal != deleteConfirmModal || !next.hasDeleteTarget || next.deleteIndex != 0 {
+		t.Fatalf("expected right-click to open delete confirmation for row 0, modal=%v hasTarget=%v deleteIndex=%d", next.modal, next.hasDeleteTarget, next.deleteIndex)
+	}
+}
+
+func TestMouseWheelMovesSearchConfigAndModalCursors(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git", "node_modules"},
+		Theme:           "tokyonight",
+		AutoScanOnStart: false,
+	})
+	m.mode = viewSearch
+	m.searchRes = []db.Entry{
+		{Name: "a.txt", Path: "/tmp/a.txt"},
+		{Name: "b.txt", Path: "/tmp/b.txt"},
+		{Name: "c.txt", Path: "/tmp/c.txt"},
+	}
+	m.syncSearchTableRows()
+
+	updated, _ := m.Update(mouseEventIn(m.searchResultHitbox(0), tea.MouseActionPress, tea.MouseButtonWheelDown))
+	next := updated.(model)
+	if next.searchCur != 1 || next.searchTable.Cursor() != 1 {
+		t.Fatalf("expected wheel down to move search cursor to 1, searchCur=%d tableCursor=%d", next.searchCur, next.searchTable.Cursor())
+	}
+
+	m = newModel(context.Background(), m.cfg)
+	m.mode = viewConfig
+	updated, _ = m.Update(mouseEventIn(m.configRowHitbox(0), tea.MouseActionPress, tea.MouseButtonWheelDown))
+	next = updated.(model)
+	if next.cfgCursor != 1 {
+		t.Fatalf("expected wheel down to move config cursor to 1, got %d", next.cfgCursor)
+	}
+
+	m = newModel(context.Background(), m.cfg)
+	m.mode = viewConfig
+	m.modal = themeModal
+	m.cfgThemeCursor = 0
+	updated, _ = m.Update(mouseEventIn(m.themeOptionHitbox(0), tea.MouseActionPress, tea.MouseButtonWheelDown))
+	next = updated.(model)
+	if next.cfgThemeCursor != 1 {
+		t.Fatalf("expected wheel down to move theme cursor to 1, got %d", next.cfgThemeCursor)
 	}
 }
 

@@ -87,6 +87,38 @@ type hitbox struct {
 	h int
 }
 
+type mouseTargetKind int
+
+const (
+	mouseTargetNone mouseTargetKind = iota
+	mouseTargetSettings
+	mouseTargetStartupProgress
+	mouseTargetMenuCard
+	mouseTargetSearchInput
+	mouseTargetSearchResult
+	mouseTargetConfigRow
+	mouseTargetConfigExclude
+	mouseTargetPathOption
+	mouseTargetThemeOption
+	mouseTargetModalInput
+	mouseTargetModalOutside
+)
+
+type mouseTarget struct {
+	kind  mouseTargetKind
+	index int
+}
+
+type searchMouseLayout struct {
+	settingsButton hitbox
+	searchInput    hitbox
+	firstResultY   int
+	resultX        int
+	resultW        int
+	visibleStart   int
+	visibleEnd     int
+}
+
 type scanProgressSource struct {
 	mu       sync.Mutex
 	session  int
@@ -168,11 +200,17 @@ type model struct {
 	scanSession          int
 	scanProgressSource   *scanProgressSource
 	activeScanLabel      string
+
+	hoveredMouse   mouseTarget
+	pressedMouse   mouseTarget
+	dragOrigin     mouseTarget
+	lastClickMouse mouseTarget
+	lastClickAt    time.Time
 }
 
 func Run(ctx context.Context, cfg config.Config) error {
 	m := newModel(ctx, cfg)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseAllMotion())
 	_, err := p.Run()
 	return err
 }
@@ -322,13 +360,7 @@ func (m model) openSettingsView() model {
 }
 
 func (m model) settingsButtonHitbox() hitbox {
-	topbarH := lipgloss.Height(m.renderTopBar())
-	return hitbox{
-		x: max(0, m.width-24),
-		y: 1 + topbarH + 1,
-		w: 22,
-		h: 3,
-	}
+	return m.searchMouseLayout().settingsButton
 }
 
 func (h hitbox) contains(x, y int) bool {
@@ -344,6 +376,589 @@ func (m model) settingsButtonClicked(msg tea.MouseMsg) bool {
 		return false
 	}
 	return m.settingsButtonHitbox().contains(ev.X, ev.Y)
+}
+
+func (m model) contentStartY() int {
+	y := 1
+	if m.mode == viewMenu {
+		y += lipgloss.Height(m.renderLogo())
+	}
+	y += lipgloss.Height(m.renderTopBar())
+	return y
+}
+
+func (m model) contentStartX() int {
+	return 2
+}
+
+func (m model) startupProgressHitbox() hitbox {
+	bodyW, bodyH := m.bodySize()
+	cardW := max(32, min(78, bodyW-4))
+	cardH := 5
+	if m.showScanProgress {
+		cardH = 14
+	}
+	cardH = max(3, min(cardH, bodyH-2))
+	return hitbox{
+		x: m.contentStartX() + max(0, (bodyW-cardW)/2),
+		y: 1 + max(0, (bodyH-cardH)/2),
+		w: cardW,
+		h: cardH,
+	}
+}
+
+func (m model) menuCardHitbox(index int) hitbox {
+	bodyW, _ := m.bodySize()
+	cardW := max(28, min(54, bodyW-10))
+	return hitbox{
+		x: m.contentStartX() + 3,
+		y: m.contentStartY() + 4 + index*5,
+		w: cardW + 4,
+		h: 3,
+	}
+}
+
+func (m model) searchInputHitbox() hitbox {
+	return m.searchMouseLayout().searchInput
+}
+
+func (m model) searchResultsStartY() int {
+	return m.searchMouseLayout().firstResultY
+}
+
+func (m model) searchVisibleRange() (int, int) {
+	if len(m.searchRes) == 0 {
+		return 0, 0
+	}
+	cursor := min(max(0, m.searchTable.Cursor()), len(m.searchRes)-1)
+	visibleRows := max(1, m.searchTable.Height())
+	start := 0
+	if cursor >= visibleRows {
+		start = cursor - visibleRows + 1
+	}
+	end := min(len(m.searchRes), start+visibleRows)
+	if end-start < visibleRows {
+		start = max(0, end-visibleRows)
+	}
+	return start, end
+}
+
+func (m model) searchResultHitbox(index int) hitbox {
+	layout := m.searchMouseLayout()
+	return hitbox{
+		x: layout.resultX,
+		y: layout.firstResultY + (index - layout.visibleStart),
+		w: layout.resultW,
+		h: 1,
+	}
+}
+
+func (m model) searchTopRow(width int) (string, int) {
+	chip := func(s string, active bool) string {
+		st := lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(m.theme.Badge).
+			Foreground(m.theme.Muted.GetForeground()).
+			Padding(0, 1)
+		if active {
+			st = st.BorderForeground(m.theme.BorderHi).Foreground(m.theme.Text.GetForeground())
+		}
+		return st.Render(s)
+	}
+	top := lipgloss.JoinHorizontal(lipgloss.Center,
+		m.theme.Highlight.Render("search"),
+		m.theme.Muted.Render(" in "),
+		chip(m.cfg.DefaultScanPath, true),
+	)
+	settingsButton := m.settingsButtonView()
+	topAvailable := max(20, width-8)
+	spacerW := max(1, topAvailable-lipgloss.Width(top)-lipgloss.Width(settingsButton))
+	settingsOffset := lipgloss.Width(top) + spacerW
+	topRow := lipgloss.JoinHorizontal(lipgloss.Center, top, strings.Repeat(" ", spacerW), settingsButton)
+	if lipgloss.Width(topRow) > topAvailable {
+		shortSearch := m.theme.Highlight.Render("search")
+		settingsOffset = lipgloss.Width(shortSearch) + 1
+		topRow = lipgloss.JoinHorizontal(lipgloss.Center, shortSearch, " ", settingsButton)
+	}
+	return topRow, settingsOffset
+}
+
+func (m model) searchBoxView() string {
+	searchBox := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(m.theme.Input).
+		Padding(0, 1)
+	inputText := m.searchInput.View()
+	if !m.searchListFocus {
+		inputText = m.inputFocusStyle().Render(inputText)
+	}
+	boxLine := lipgloss.JoinHorizontal(lipgloss.Top, "🔎 ", inputText, "   ", m.theme.Muted.Render(fmt.Sprintf("%d results", len(m.searchRes))))
+	return searchBox.Render(boxLine)
+}
+
+func (m model) searchMouseLayout() searchMouseLayout {
+	bodyW, _ := m.bodySize()
+	contentX := m.contentStartX()
+	contentY := m.contentStartY()
+	lineX := contentX + 2 // search card border + horizontal padding
+
+	topRow, settingsOffset := m.searchTopRow(bodyW)
+	settingsButton := m.settingsButtonView()
+	searchBox := m.searchBoxView()
+	start, end := m.searchVisibleRange()
+	resultW := max(searchColumnsWidth(m.searchTable.Columns()), m.searchTable.Width())
+
+	// These heights are derived from the same rendered fragments that viewSearch
+	// composes: card border/padding line, top row, search input box, "RESULTS",
+	// and the table header line produced by renderSearchResults.
+	firstResultY := contentY + 1 + lipgloss.Height(topRow) + lipgloss.Height(searchBox) + 2
+
+	return searchMouseLayout{
+		settingsButton: hitbox{
+			x: lineX + settingsOffset,
+			y: contentY + 1,
+			w: lipgloss.Width(settingsButton),
+			h: lipgloss.Height(settingsButton),
+		},
+		searchInput: hitbox{
+			x: lineX,
+			y: contentY + 1 + lipgloss.Height(topRow),
+			w: lipgloss.Width(searchBox),
+			h: lipgloss.Height(searchBox),
+		},
+		firstResultY: firstResultY,
+		resultX:      lineX,
+		resultW:      resultW,
+		visibleStart: start,
+		visibleEnd:   end,
+	}
+}
+
+func (m model) configRowHitbox(index int) hitbox {
+	bodyW, _ := m.bodySize()
+	outerWidth := min(120, max(44, bodyW-2))
+	wide := outerWidth >= 96
+	leftW := outerWidth
+	if wide {
+		leftW = max(30, int(float64(outerWidth)*0.56))
+	}
+	return hitbox{
+		x: m.contentStartX() + 1,
+		y: m.contentStartY() + 3 + index*5,
+		w: max(28, leftW-4),
+		h: 3,
+	}
+}
+
+func (m model) configExcludeHitbox(index int) hitbox {
+	bodyW, _ := m.bodySize()
+	outerWidth := min(120, max(44, bodyW-2))
+	wide := outerWidth >= 96
+	gap := 2
+	x := m.contentStartX() + 1
+	y := m.contentStartY() + 20 + index
+	w := max(24, outerWidth-4)
+	if wide {
+		leftW := max(30, int(float64(outerWidth)*0.56))
+		rightW := outerWidth - leftW - gap
+		if rightW >= 24 {
+			x = m.contentStartX() + leftW + gap + 1
+			y = m.contentStartY() + 3 + index
+			w = max(22, rightW-4)
+		}
+	}
+	return hitbox{x: x, y: y, w: w, h: 1}
+}
+
+func (m model) modalBoxHitbox() hitbox {
+	bodyW, _ := m.bodySize()
+	contentH := m.contentHeight()
+	modalW := max(28, min(72, bodyW-8))
+	modalH := 8
+	switch m.modal {
+	case pathModal:
+		modalH = 6 + len(m.pathOptions)
+		if m.cfgInputActive {
+			modalH = 11
+		}
+	case themeModal:
+		modalH = 7 + len(m.themes)
+	case excludeInputModal:
+		modalH = 10
+	case deleteConfirmModal:
+		modalH = 11
+	}
+	return hitbox{
+		x: m.contentStartX() + max(0, (bodyW-modalW)/2),
+		y: m.contentStartY() + max(0, (contentH-modalH)/2),
+		w: modalW,
+		h: modalH,
+	}
+}
+
+func (m model) pathOptionHitbox(index int) hitbox {
+	box := m.modalBoxHitbox()
+	return hitbox{x: box.x + 2, y: box.y + 4 + index, w: max(1, box.w-4), h: 1}
+}
+
+func (m model) themeOptionHitbox(index int) hitbox {
+	box := m.modalBoxHitbox()
+	return hitbox{x: box.x + 2, y: box.y + 5 + index, w: max(1, box.w-4), h: 1}
+}
+
+func (m model) modalInputHitbox() hitbox {
+	box := m.modalBoxHitbox()
+	return hitbox{x: box.x + 2, y: box.y + box.h - 3, w: max(1, box.w-4), h: 3}
+}
+
+func (m model) resolveMouseTarget(x, y int) mouseTarget {
+	if m.modal != noModal {
+		switch m.modal {
+		case pathModal:
+			if m.cfgInputActive {
+				if m.modalInputHitbox().contains(x, y) {
+					return mouseTarget{kind: mouseTargetModalInput}
+				}
+			} else {
+				for i := range m.pathOptions {
+					if m.pathOptionHitbox(i).contains(x, y) {
+						return mouseTarget{kind: mouseTargetPathOption, index: i}
+					}
+				}
+			}
+		case themeModal:
+			for i := range m.themes {
+				if m.themeOptionHitbox(i).contains(x, y) {
+					return mouseTarget{kind: mouseTargetThemeOption, index: i}
+				}
+			}
+		case excludeInputModal:
+			if m.modalInputHitbox().contains(x, y) {
+				return mouseTarget{kind: mouseTargetModalInput}
+			}
+		}
+		if !m.modalBoxHitbox().contains(x, y) {
+			return mouseTarget{kind: mouseTargetModalOutside}
+		}
+		return mouseTarget{}
+	}
+
+	switch m.mode {
+	case viewStartup:
+		if m.startupProgressHitbox().contains(x, y) {
+			return mouseTarget{kind: mouseTargetStartupProgress}
+		}
+	case viewMenu:
+		for i := range m.menu {
+			if m.menuCardHitbox(i).contains(x, y) {
+				return mouseTarget{kind: mouseTargetMenuCard, index: i}
+			}
+		}
+	case viewSearch:
+		if m.settingsButtonHitbox().contains(x, y) {
+			return mouseTarget{kind: mouseTargetSettings}
+		}
+		if m.searchInputHitbox().contains(x, y) {
+			return mouseTarget{kind: mouseTargetSearchInput}
+		}
+		start, end := m.searchVisibleRange()
+		for i := start; i < end; i++ {
+			if m.searchResultHitbox(i).contains(x, y) {
+				return mouseTarget{kind: mouseTargetSearchResult, index: i}
+			}
+		}
+	case viewConfig:
+		for i := 0; i < 3; i++ {
+			if m.configRowHitbox(i).contains(x, y) {
+				return mouseTarget{kind: mouseTargetConfigRow, index: i}
+			}
+		}
+		for i := range m.cfg.Excludes {
+			if m.configExcludeHitbox(i).contains(x, y) {
+				return mouseTarget{kind: mouseTargetConfigExclude, index: i}
+			}
+		}
+	}
+	return mouseTarget{}
+}
+
+func (m model) mouseHoverMatches(kind mouseTargetKind, index int) bool {
+	return m.hoveredMouse.kind == kind && m.hoveredMouse.index == index
+}
+
+func (m model) selectSearchResult(index int) model {
+	if index < 0 || index >= len(m.searchRes) {
+		return m
+	}
+	m.searchListFocus = true
+	m.searchInput.Blur()
+	m.searchTable.Focus()
+	m.searchCur = index
+	m.syncSearchTableRows()
+	m.searchTable.SetCursor(index)
+	return m
+}
+
+func (m model) openSelectedDeleteModal(index int) model {
+	if index < 0 || index >= len(m.searchRes) {
+		return m
+	}
+	m = m.selectSearchResult(index)
+	m.deleteIndex = index
+	m.deleteTarget = m.searchRes[index]
+	m.hasDeleteTarget = true
+	m.modal = deleteConfirmModal
+	return m
+}
+
+func (m model) focusSearchInput() model {
+	m.searchListFocus = false
+	m.searchInput.Focus()
+	m.searchTable.Blur()
+	return m
+}
+
+func (m model) activateMenuSelection() (model, tea.Cmd) {
+	switch m.menu[m.menuCursor] {
+	case "Search":
+		m.mode = viewSearch
+		m = m.focusSearchInput()
+		return m, nil
+	case "Scan/Re-index":
+		if m.busy {
+			return m, nil
+		}
+		roots, err := defaultScanRoots(m.cfg)
+		if err != nil {
+			m.err = err
+			m.status = "re-index failed"
+			return m, nil
+		}
+		m.status = "re-indexing…"
+		return m.startScanCmd(roots, "reindex", true)
+	case "Config":
+		m.mode = viewConfig
+		return m, nil
+	}
+	return m, nil
+}
+
+func (m model) activateConfigRow(index int) (model, tea.Cmd) {
+	m.cfgCursor = min(max(0, index), 2+max(0, len(m.cfg.Excludes)))
+	switch index {
+	case 0:
+		m.modal = pathModal
+		m.cfgPathCursor = 0
+	case 1:
+		m.modal = themeModal
+		idx := slices.Index(m.themes, m.cfg.Theme)
+		if idx < 0 {
+			idx = 0
+		}
+		m.cfgThemeCursor = idx
+	case 2:
+		m.cfg.DeleteMode = nextDeleteMode(m.cfg.DeleteMode)
+		if err := config.Save(m.cfg); err != nil {
+			m.err = err
+		} else {
+			m.status = "delete mode updated"
+		}
+	}
+	return m, nil
+}
+
+func (m model) removeExcludeAt(index int) model {
+	if index < 0 || index >= len(m.cfg.Excludes) {
+		return m
+	}
+	m.cfg.Excludes = append(m.cfg.Excludes[:index], m.cfg.Excludes[index+1:]...)
+	m.cfgCursor = min(m.cfgCursor, 2+max(0, len(m.cfg.Excludes)))
+	if len(m.cfg.Excludes) == 0 {
+		m.cfg.Excludes = scanner.DefaultExcludes()
+	}
+	if err := config.Save(m.cfg); err != nil {
+		m.err = err
+	} else {
+		m.status = "exclude removed"
+	}
+	return m
+}
+
+func (m model) handlePathOptionClick(index int) (model, tea.Cmd) {
+	if index < 0 || index >= len(m.pathOptions) {
+		return m, nil
+	}
+	m.cfgPathCursor = index
+	choice := m.pathOptions[index]
+	if choice == "__custom__" {
+		m.cfgInputActive = true
+		m.cfgInputTarget = "scan"
+		m.cfgInput.SetValue("")
+		m.cfgInput.Placeholder = "Custom scan path (example: ~/Projects)"
+		m.cfgInput.Prompt = "scan-path> "
+		return m, m.cfgInput.Focus()
+	}
+	next, err := m.saveScanPath(choice)
+	if err != nil {
+		next.err = err
+		return next, nil
+	}
+	return next.closeModal(), nil
+}
+
+func (m model) handleThemeOptionClick(index int) (model, tea.Cmd) {
+	if index < 0 || index >= len(m.themes) {
+		return m, nil
+	}
+	m.cfgThemeCursor = index
+	m.cfg.Theme = m.themes[index]
+	m.theme = themeByName(m.cfg.Theme)
+	m.resizeComponents()
+	if err := config.Save(m.cfg); err != nil {
+		m.err = err
+	} else {
+		m.status = "theme updated"
+	}
+	return m.closeModal(), nil
+}
+
+func (m model) scrollSearchResults(delta int) model {
+	if len(m.searchRes) == 0 {
+		return m
+	}
+	m = m.selectSearchResult(min(max(0, m.searchTable.Cursor()+delta), len(m.searchRes)-1))
+	return m
+}
+
+func (m model) scrollConfig(delta int) model {
+	totalRows := 3 + len(m.cfg.Excludes)
+	if totalRows <= 0 {
+		return m
+	}
+	m.cfgCursor = min(max(0, m.cfgCursor+delta), totalRows-1)
+	return m
+}
+
+func (m model) scrollModal(delta int) model {
+	switch m.modal {
+	case pathModal:
+		if !m.cfgInputActive && len(m.pathOptions) > 0 {
+			m.cfgPathCursor = min(max(0, m.cfgPathCursor+delta), len(m.pathOptions)-1)
+		}
+	case themeModal:
+		if len(m.themes) > 0 {
+			m.cfgThemeCursor = min(max(0, m.cfgThemeCursor+delta), len(m.themes)-1)
+		}
+	}
+	return m
+}
+
+func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	ev := tea.MouseEvent(msg)
+	target := m.resolveMouseTarget(ev.X, ev.Y)
+
+	if ev.Action == tea.MouseActionMotion {
+		m.hoveredMouse = target
+		if ev.Button == tea.MouseButtonLeft && target.kind == mouseTargetSearchResult {
+			m = m.selectSearchResult(target.index)
+		}
+		return m, nil
+	}
+
+	if ev.IsWheel() {
+		delta := 0
+		switch ev.Button {
+		case tea.MouseButtonWheelUp:
+			delta = -1
+		case tea.MouseButtonWheelDown:
+			delta = 1
+		}
+		if delta == 0 {
+			return m, nil
+		}
+		if m.modal != noModal {
+			return m.scrollModal(delta), nil
+		}
+		switch m.mode {
+		case viewStartup:
+			m.showScanProgress = true
+		case viewSearch:
+			m = m.scrollSearchResults(delta)
+		case viewConfig:
+			m = m.scrollConfig(delta)
+		case viewMenu:
+			if len(m.menu) > 0 {
+				m.menuCursor = min(max(0, m.menuCursor+delta), len(m.menu)-1)
+			}
+		}
+		return m, nil
+	}
+
+	if ev.Action == tea.MouseActionRelease {
+		m.pressedMouse = mouseTarget{}
+		m.dragOrigin = mouseTarget{}
+		m.hoveredMouse = target
+		return m, nil
+	}
+
+	if ev.Action != tea.MouseActionPress {
+		return m, nil
+	}
+
+	m.pressedMouse = target
+	m.dragOrigin = target
+	m.hoveredMouse = target
+
+	if ev.Button == tea.MouseButtonRight && target.kind == mouseTargetSearchResult {
+		return m.openSelectedDeleteModal(target.index), nil
+	}
+	if ev.Button == tea.MouseButtonRight && target.kind == mouseTargetConfigExclude {
+		m.cfgCursor = target.index + 3
+		return m.removeExcludeAt(target.index), nil
+	}
+	if ev.Button != tea.MouseButtonLeft {
+		return m, nil
+	}
+
+	switch target.kind {
+	case mouseTargetSettings:
+		m = m.openSettingsView()
+	case mouseTargetStartupProgress:
+		m.showScanProgress = !m.showScanProgress
+	case mouseTargetMenuCard:
+		if target.index >= 0 && target.index < len(m.menu) {
+			m.menuCursor = target.index
+			return m.activateMenuSelection()
+		}
+	case mouseTargetSearchInput:
+		m = m.focusSearchInput()
+	case mouseTargetSearchResult:
+		if target.index >= 0 && target.index < len(m.searchRes) {
+			doubleClick := m.lastClickMouse == target && time.Since(m.lastClickAt) <= 450*time.Millisecond
+			m = m.selectSearchResult(target.index)
+			m.lastClickMouse = target
+			m.lastClickAt = time.Now()
+			if doubleClick {
+				return m, openCmd(m.searchRes[target.index].Path, true)
+			}
+		}
+	case mouseTargetConfigRow:
+		return m.activateConfigRow(target.index)
+	case mouseTargetConfigExclude:
+		m.cfgCursor = target.index + 3
+	case mouseTargetPathOption:
+		return m.handlePathOptionClick(target.index)
+	case mouseTargetThemeOption:
+		return m.handleThemeOptionClick(target.index)
+	case mouseTargetModalInput:
+		m.cfgInputActive = true
+		return m, m.cfgInput.Focus()
+	case mouseTargetModalOutside:
+		if m.modal != deleteConfirmModal {
+			m = m.closeModal()
+		}
+	}
+	return m, nil
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -465,11 +1080,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
-		if m.settingsButtonClicked(msg) {
-			m = m.openSettingsView()
-			return m, nil
-		}
-		return m, nil
+		return m.handleMouse(msg)
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -556,29 +1167,7 @@ func (m model) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "k", "up":
 		m.menuCursor = (m.menuCursor - 1 + len(m.menu)) % len(m.menu)
 	case "enter":
-		switch m.menu[m.menuCursor] {
-		case "Search":
-			m.mode = viewSearch
-			m.searchListFocus = false
-			m.searchInput.Focus()
-			m.searchTable.Blur()
-			return m, nil
-		case "Scan/Re-index":
-			if m.busy {
-				return m, nil
-			}
-			roots, err := defaultScanRoots(m.cfg)
-			if err != nil {
-				m.err = err
-				m.status = "re-index failed"
-				return m, nil
-			}
-			m.status = "re-indexing…"
-			return m.startScanCmd(roots, "reindex", true)
-		case "Config":
-			m.mode = viewConfig
-			return m, nil
-		}
+		return m.activateMenuSelection()
 	}
 	return m, nil
 }
@@ -646,40 +1235,10 @@ func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cfgInput.SetValue("")
 		return m, m.cfgInput.Focus()
 	case "enter":
-		switch m.cfgCursor {
-		case 0:
-			m.modal = pathModal
-			m.cfgPathCursor = 0
-		case 1:
-			m.modal = themeModal
-			idx := slices.Index(m.themes, m.cfg.Theme)
-			if idx < 0 {
-				idx = 0
-			}
-			m.cfgThemeCursor = idx
-		case 2:
-			m.cfg.DeleteMode = nextDeleteMode(m.cfg.DeleteMode)
-			if err := config.Save(m.cfg); err != nil {
-				m.err = err
-			} else {
-				m.status = "delete mode updated"
-			}
-		}
+		return m.activateConfigRow(m.cfgCursor)
 	case "d":
 		exIdx := m.cfgCursor - 3
-		if exIdx < 0 || exIdx >= len(m.cfg.Excludes) {
-			return m, nil
-		}
-		m.cfg.Excludes = append(m.cfg.Excludes[:exIdx], m.cfg.Excludes[exIdx+1:]...)
-		m.cfgCursor = min(m.cfgCursor, 2+max(0, len(m.cfg.Excludes)))
-		if len(m.cfg.Excludes) == 0 {
-			m.cfg.Excludes = scanner.DefaultExcludes()
-		}
-		if err := config.Save(m.cfg); err != nil {
-			m.err = err
-		} else {
-			m.status = "exclude removed"
-		}
+		m = m.removeExcludeAt(exIdx)
 	}
 	return m, nil
 }
@@ -948,13 +1507,13 @@ func (m model) renderError() string {
 func (m model) renderHelp() string {
 	keys := "j/k move • enter select • ctrl+g scan now • ctrl+x stop scan • esc back • ctrl+q quit"
 	if m.modal != noModal {
-		keys = "j/k move • enter select • esc close modal • ctrl+q quit"
+		keys = "j/k or wheel move • click select • esc/outside click close modal • ctrl+q quit"
 	} else if m.mode == viewStartup {
-		keys = "space progress • ctrl+x cancel • ctrl+q quit"
+		keys = "space/click/wheel progress • ctrl+x cancel • ctrl+q quit"
 	} else if m.mode == viewConfig {
-		keys = "j/k move • enter select/edit/toggle • a add exclude • d remove exclude • ctrl+g scan now • esc search • ctrl+q quit"
+		keys = "j/k or wheel move • click edit/toggle • right-click exclude removes • a add • d remove • esc search • ctrl+q quit"
 	} else if m.mode == viewSearch {
-		keys = "ctrl+s settings • tab focus input/list • enter open folder • d delete • / focus search • ctrl+g scan now • ctrl+q quit"
+		keys = "click select • double-click open • right-click delete • wheel move • ctrl+s settings • / focus • ctrl+q quit"
 	}
 	return m.theme.Muted.Render(trimMiddle("keys: "+keys, max(20, m.width-6)))
 }
@@ -1051,9 +1610,15 @@ func (m model) panelStyle() lipgloss.Style {
 }
 
 func (m model) itemStyle(active bool) lipgloss.Style {
+	return m.itemStyleState(active, false)
+}
+
+func (m model) itemStyleState(active bool, hovered bool) lipgloss.Style {
 	st := m.panelStyle()
 	if active {
 		st = st.BorderForeground(m.theme.BorderHi).Background(m.theme.SurfaceBG)
+	} else if hovered {
+		st = st.BorderForeground(m.theme.Badge).Background(m.theme.SurfaceBG)
 	}
 	return st
 }
@@ -1081,8 +1646,8 @@ func (m model) viewMenu(width int) string {
 		{Title: "Config", Desc: "Paths, themes and scan preferences", Hotkey: "C"},
 	}
 
-	renderCard := func(card menuCard, active bool) string {
-		base := m.itemStyle(active).Width(max(28, min(54, width-6)))
+	renderCard := func(card menuCard, active bool, hovered bool) string {
+		base := m.itemStyleState(active, hovered).Width(max(28, min(54, width-6)))
 
 		title := m.theme.Text.Copy().Bold(true).Render(card.Title)
 		desc := m.theme.Muted.Render(card.Desc)
@@ -1098,7 +1663,7 @@ func (m model) viewMenu(width int) string {
 
 	lines := []string{m.theme.Title.Render("MAIN MENU")}
 	for i, card := range cards {
-		lines = append(lines, renderCard(card, i == m.menuCursor))
+		lines = append(lines, renderCard(card, i == m.menuCursor, m.mouseHoverMatches(mouseTargetMenuCard, i)))
 	}
 	return m.panelStyle().Width(max(32, min(60, width-4))).Render(strings.Join(lines, "\n\n"))
 }
@@ -1152,41 +1717,10 @@ func (m model) settingsButtonView() string {
 
 func (m model) viewSearch(width, height int) string {
 	var lines []string
-	chip := func(s string, active bool) string {
-		st := lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(m.theme.Badge).
-			Foreground(m.theme.Muted.GetForeground()).
-			Padding(0, 1)
-		if active {
-			st = st.BorderForeground(m.theme.BorderHi).Foreground(m.theme.Text.GetForeground())
-		}
-		return st.Render(s)
-	}
-	top := lipgloss.JoinHorizontal(lipgloss.Center,
-		m.theme.Highlight.Render("search"),
-		m.theme.Muted.Render(" in "),
-		chip(m.cfg.DefaultScanPath, true),
-	)
-	settingsButton := m.settingsButtonView()
-	topAvailable := max(20, width-8)
-	spacerW := max(1, topAvailable-lipgloss.Width(top)-lipgloss.Width(settingsButton))
-	topRow := lipgloss.JoinHorizontal(lipgloss.Center, top, strings.Repeat(" ", spacerW), settingsButton)
-	if lipgloss.Width(topRow) > topAvailable {
-		topRow = lipgloss.JoinHorizontal(lipgloss.Center, m.theme.Highlight.Render("search"), " ", settingsButton)
-	}
+	topRow, _ := m.searchTopRow(width)
 	lines = append(lines, topRow)
 
-	searchBox := lipgloss.NewStyle().
-		Border(lipgloss.RoundedBorder()).
-		BorderForeground(m.theme.Input).
-		Padding(0, 1)
-	inputText := m.searchInput.View()
-	if !m.searchListFocus {
-		inputText = m.inputFocusStyle().Render(inputText)
-	}
-	boxLine := lipgloss.JoinHorizontal(lipgloss.Top, "🔎 ", inputText, "   ", m.theme.Muted.Render(fmt.Sprintf("%d results", len(m.searchRes))))
-	lines = append(lines, searchBox.Render(boxLine))
+	lines = append(lines, m.searchBoxView())
 
 	if len(m.searchRes) == 0 {
 		lines = append(lines, m.theme.Muted.Render("No results"))
@@ -1236,6 +1770,11 @@ func (m model) renderSearchResults() string {
 				Background(m.theme.SelectBG).
 				Foreground(m.theme.SelectFG).
 				Bold(true).
+				Render(row)
+		} else if m.mouseHoverMatches(mouseTargetSearchResult, i) {
+			row = lipgloss.NewStyle().
+				Background(m.theme.SurfaceBG).
+				Foreground(m.theme.SelectFG).
 				Render(row)
 		} else {
 			row = m.theme.Text.Render(row)
@@ -1341,6 +1880,8 @@ func (m model) renderPathModal(width int) string {
 		if i == m.cfgPathCursor {
 			prefix = "➜ "
 			st = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SelectBG).Bold(true)
+		} else if m.mouseHoverMatches(mouseTargetPathOption, i) {
+			st = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SurfaceBG)
 		}
 		lines = append(lines, st.Render(prefix+trimMiddle(label, max(12, min(64, width-16)))))
 	}
@@ -1359,6 +1900,8 @@ func (m model) renderThemeModal(width int) string {
 		if i == m.cfgThemeCursor {
 			prefix = "➜ "
 			st = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SelectBG).Bold(true)
+		} else if m.mouseHoverMatches(mouseTargetThemeOption, i) {
+			st = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SurfaceBG)
 		}
 		lines = append(lines, st.Render(prefix+th))
 	}
@@ -1461,7 +2004,7 @@ func (m model) viewConfig(width, height int) string {
 		if action != "" {
 			body += "\n" + m.theme.Muted.Render(action)
 		}
-		return m.itemStyle(m.cfgCursor == idx).Width(width).Render(body)
+		return m.itemStyleState(m.cfgCursor == idx, m.mouseHoverMatches(mouseTargetConfigRow, idx)).Width(width).Render(body)
 	}
 
 	leftRows := []string{
@@ -1480,6 +2023,8 @@ func (m model) viewConfig(width, height int) string {
 		st := m.theme.Text
 		if m.cfgCursor == idx {
 			st = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SelectBG).Bold(true)
+		} else if m.mouseHoverMatches(mouseTargetConfigExclude, i) {
+			st = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SurfaceBG)
 		}
 		exLines = append(exLines, st.Render(row))
 	}
