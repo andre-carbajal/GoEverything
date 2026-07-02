@@ -108,7 +108,7 @@ func newScanCommand(opt *options, cfg *config.Config) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 
 			roots := []string{opt.Root}
 			if opt.Roots {
@@ -163,7 +163,7 @@ func newReindexCommand(opt *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 
 			if err := store.ReindexFTS(cmd.Context()); err != nil {
 				return err
@@ -187,7 +187,7 @@ func newSearchCommand(opt *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 
 			searchOpts := db.SearchOptions{
 				Query:     opt.Query,
@@ -243,7 +243,7 @@ func newWatchCommand(opt *options) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 
 			root := opt.Root
 			if root == "" {

@@ -184,7 +184,7 @@ func TestSearchResultSelectionRendersFullRowWidth(t *testing.T) {
 		{Name: "one.txt", Path: "/tmp/one.txt", Size: 1024},
 		{Name: "two.txt", Path: "/tmp/two.txt", Size: 2048},
 	}
-	m.syncSearchTableRows()
+	m = m.syncSearchTableRows()
 	m.searchTable.SetCursor(1)
 
 	out := m.renderSearchResults()
@@ -212,7 +212,7 @@ func TestSearchListDOpensDeleteConfirmationAndCancelKeepsResults(t *testing.T) {
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{{Name: "delete-me.txt", Path: "/tmp/delete-me.txt"}}
-	m.syncSearchTableRows()
+	m = m.syncSearchTableRows()
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
 	next := updated.(model)
@@ -283,7 +283,7 @@ func TestDeleteResultSuccessRemovesResultAndClampsCursor(t *testing.T) {
 		{Name: "child.txt", Path: "/tmp/folder/child.txt"},
 	}
 	m.searchCur = 2
-	m.syncSearchTableRows()
+	m = m.syncSearchTableRows()
 
 	updated, _ := m.Update(deleteResultDoneMsg{entry: deleted, total: 1})
 	next := updated.(model)
@@ -660,7 +660,7 @@ func modelWithManySearchRows() model {
 		}
 	}
 	m.searchCur = 10
-	m.syncSearchTableRows()
+	m = m.syncSearchTableRows()
 	return m
 }
 
@@ -704,7 +704,7 @@ func TestMouseHoverTracksInteractiveTargetsWithoutActivating(t *testing.T) {
 		{Name: "a.txt", Path: "/tmp/a.txt"},
 		{Name: "b.txt", Path: "/tmp/b.txt"},
 	}
-	m.syncSearchTableRows()
+	m = m.syncSearchTableRows()
 	updated, _ = m.Update(mouseEventIn(m.searchResultHitbox(1), tea.MouseActionMotion, tea.MouseButtonNone))
 	next = updated.(model)
 	if next.hoveredMouse.kind != mouseTargetSearchResult || next.hoveredMouse.index != 1 {
@@ -840,7 +840,7 @@ func TestSearchResultMouseClickDoubleClickAndRightClick(t *testing.T) {
 		{Name: "a.txt", Path: "/tmp/a.txt"},
 		{Name: "b.txt", Path: "/tmp/b.txt"},
 	}
-	m.syncSearchTableRows()
+	m = m.syncSearchTableRows()
 
 	updated, cmd := m.Update(mouseEventIn(m.searchResultHitbox(1), tea.MouseActionPress, tea.MouseButtonLeft))
 	next := updated.(model)
@@ -880,7 +880,7 @@ func TestMouseWheelMovesSearchConfigAndModalCursors(t *testing.T) {
 		{Name: "b.txt", Path: "/tmp/b.txt"},
 		{Name: "c.txt", Path: "/tmp/c.txt"},
 	}
-	m.syncSearchTableRows()
+	m = m.syncSearchTableRows()
 
 	updated, _ := m.Update(mouseEventIn(m.searchResultHitbox(0), tea.MouseActionPress, tea.MouseButtonWheelDown))
 	next := updated.(model)

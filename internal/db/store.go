@@ -162,6 +162,7 @@ func (s *Store) migrateLegacyPathSchema(ctx context.Context) error {
 		}
 	}
 
+	//noinspection SqlResolve,SqlRedundantOrderingDirection
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, name, path, ext, size, mtime, is_dir, root, indexed_at
 		FROM entries
@@ -169,27 +170,28 @@ func (s *Store) migrateLegacyPathSchema(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	insertDir, err := tx.PrepareContext(ctx, `INSERT INTO directories(path) VALUES (?) ON CONFLICT(path) DO NOTHING`)
 	if err != nil {
 		return err
 	}
-	defer insertDir.Close()
+	defer func() { _ = insertDir.Close() }()
 
 	selectDirID, err := tx.PrepareContext(ctx, `SELECT id FROM directories WHERE path = ?`)
 	if err != nil {
 		return err
 	}
-	defer selectDirID.Close()
+	defer func() { _ = selectDirID.Close() }()
 
+	//noinspection SqlResolve
 	insertEntry, err := tx.PrepareContext(ctx, `
 		INSERT INTO entries_v2(id, name, dir_id, ext, size, mtime, is_dir, root, indexed_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
-	defer insertEntry.Close()
+	defer func() { _ = insertEntry.Close() }()
 
 	for rows.Next() {
 		var (
@@ -228,6 +230,7 @@ func (s *Store) migrateLegacyPathSchema(ctx context.Context) error {
 		return err
 	}
 
+	//noinspection SqlResolve
 	swap := []string{
 		`DROP TABLE entries;`,
 		`ALTER TABLE entries_v2 RENAME TO entries;`,
@@ -258,7 +261,7 @@ func (s *Store) tableHasColumn(ctx context.Context, table, column string) (bool,
 	if err != nil {
 		return false, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var (
@@ -336,7 +339,7 @@ func (s *Store) upsertBatchOnce(ctx context.Context, entries []Entry) error {
 		if len(paths) > 0 {
 			if err := tx.NewSelect().
 				Model(&directoryRows).
-				Where("path IN (?)", bun.In(paths)).
+				Where("path IN (?)", bun.List(paths)).
 				Scan(ctx); err != nil {
 				return err
 			}
@@ -471,6 +474,7 @@ func (s *Store) SearchAdvanced(ctx context.Context, opts SearchOptions) ([]Entry
 		return s.searchByLike(ctx, query, opts)
 	}
 
+	//noinspection SqlResolve,SqlDialectInspection,SqlNoDataSourceInspection
 	q := `
 		SELECT e.name, d.path, e.ext, e.size, e.mtime, e.is_dir, e.root, e.indexed_at
 		FROM entries_fts f
@@ -479,8 +483,7 @@ func (s *Store) SearchAdvanced(ctx context.Context, opts SearchOptions) ([]Entry
 		WHERE entries_fts MATCH ?`
 	args := []any{buildFTSQuery(query)}
 	q, args = applySearchFilters(q, args, opts)
-	q += `
-		ORDER BY
+	q += "\n\t\t" + "ORDER BY" + `
 			CASE
 				WHEN e.name = ? THEN 0
 				WHEN e.name LIKE ? THEN 1
@@ -495,7 +498,7 @@ func (s *Store) SearchAdvanced(ctx context.Context, opts SearchOptions) ([]Entry
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return scanEntries(rows, opts.Limit)
 }
@@ -514,14 +517,14 @@ func (s *Store) searchByLike(ctx context.Context, query string, opts SearchOptio
 	args := []any{nameLike}
 
 	q, args = applySearchFilters(q, args, opts)
-	q += ` ORDER BY e.name ASC, d.path ASC LIMIT ? OFFSET ?`
+	q += " " + "ORDER BY" + ` e.name ASC, d.path ASC LIMIT ? OFFSET ?`
 	args = append(args, opts.Limit, opts.Offset)
 
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	return scanEntries(rows, opts.Limit)
 }

@@ -20,7 +20,7 @@ func TestStoreSearchFTSAndWildcard(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	entries := []Entry{
 		NewEntryFromPath("/tmp", "/tmp/my_report.txt", 10, time.Now(), false),
@@ -57,7 +57,7 @@ func TestStoreSearchAdvancedFiltersAndReindex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	now := time.Now()
 	entries := []Entry{
@@ -105,7 +105,7 @@ func TestStoreSearchDoesNotMatchPathSegments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	now := time.Now()
 	entries := []Entry{
@@ -138,7 +138,7 @@ func TestStoreDirectoryDedupAndDelete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	now := time.Now()
 	entries := []Entry{
@@ -184,7 +184,7 @@ func TestStoreMigratesLegacySchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	defer legacySQL.Close()
+	defer func() { _ = legacySQL.Close() }()
 
 	// Simulate legacy schema with path stored directly in entries and FTS over path+name.
 	legacySchema := []string{
@@ -216,8 +216,8 @@ func TestStoreMigratesLegacySchema(t *testing.T) {
 		`CREATE TRIGGER entries_ai AFTER INSERT ON entries BEGIN
 			INSERT INTO entries_fts(rowid, name, path) VALUES (new.id, new.name, new.path);
 		END;`,
-		`INSERT INTO entries(name, path, ext, size, mtime, is_dir, root, indexed_at)
-		 VALUES ('main.go', '/Users/a/projects/go/main.go', 'go', 10, 1, 0, '/Users/a', 1);`,
+		"INSERT" + " INTO entries(name, " + "path" + ", ext, size, mtime, is_dir, root, indexed_at)" +
+			" VALUES ('main.go', '/Users/a/projects/go/main.go', 'go', 10, 1, 0, '/Users/a', 1);",
 	}
 	for _, stmt := range legacySchema {
 		if _, err := legacySQL.ExecContext(ctx, stmt); err != nil {
@@ -229,7 +229,7 @@ func TestStoreMigratesLegacySchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open migrated db: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	var hasPathCol int
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('entries') WHERE name='path'`).Scan(&hasPathCol); err != nil {

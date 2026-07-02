@@ -247,7 +247,7 @@ func newModel(ctx context.Context, cfg config.Config) model {
 		scanProgressSource: newScanProgressSource(),
 	}
 	m.searchTable = newSearchTable(m.theme)
-	m.resizeComponents()
+	m = m.resizeComponents()
 	return m
 }
 
@@ -269,8 +269,8 @@ func newSearchTable(th theme) table.Model {
 
 func searchTableStyles(th theme) table.Styles {
 	styles := table.DefaultStyles()
-	styles.Header = th.Title.Copy().Padding(0, 0)
-	styles.Cell = th.Text.Copy().Padding(0, 0)
+	styles.Header = th.Title.Padding(0, 0)
+	styles.Cell = th.Text.Padding(0, 0)
 	styles.Selected = lipgloss.NewStyle().
 		Background(th.SelectBG).
 		Foreground(th.SelectFG).
@@ -313,7 +313,7 @@ func (m model) contentHeight() int {
 	return max(3, bodyH-headerH-footerH-2)
 }
 
-func (m *model) resizeComponents() {
+func (m model) resizeComponents() model {
 	bodyW, _ := m.bodySize()
 	tableW := max(28, bodyW-6)
 	tableH := max(5, m.contentHeight()-5)
@@ -324,9 +324,10 @@ func (m *model) resizeComponents() {
 	m.searchTable.SetWidth(tableW)
 	m.searchTable.SetHeight(tableH)
 	m.searchTable.SetStyles(searchTableStyles(m.theme))
+	return m
 }
 
-func (m *model) syncSearchTableRows() {
+func (m model) syncSearchTableRows() model {
 	rows := make([]table.Row, 0, len(m.searchRes))
 	for _, entry := range m.searchRes {
 		rows = append(rows, table.Row(searchEntryValues(entry)))
@@ -335,12 +336,13 @@ func (m *model) syncSearchTableRows() {
 	if len(rows) == 0 {
 		m.searchCur = 0
 		m.searchTable.SetCursor(0)
-		return
+		return m
 	}
 	if m.searchCur >= len(rows) {
 		m.searchCur = len(rows) - 1
 	}
 	m.searchTable.SetCursor(m.searchCur)
+	return m
 }
 
 func (m model) focusSearchView() model {
@@ -426,20 +428,24 @@ func (m model) searchResultsStartY() int {
 	return m.searchMouseLayout().firstResultY
 }
 
-func (m model) searchVisibleRange() (int, int) {
+func (m model) searchVisibleWindow() (cursor int, start int, end int) {
 	if len(m.searchRes) == 0 {
-		return 0, 0
+		return 0, 0, 0
 	}
-	cursor := min(max(0, m.searchTable.Cursor()), len(m.searchRes)-1)
+	cursor = min(max(0, m.searchTable.Cursor()), len(m.searchRes)-1)
 	visibleRows := max(1, m.searchTable.Height())
-	start := 0
 	if cursor >= visibleRows {
 		start = cursor - visibleRows + 1
 	}
-	end := min(len(m.searchRes), start+visibleRows)
+	end = min(len(m.searchRes), start+visibleRows)
 	if end-start < visibleRows {
 		start = max(0, end-visibleRows)
 	}
+	return cursor, start, end
+}
+
+func (m model) searchVisibleRange() (int, int) {
+	_, start, end := m.searchVisibleWindow()
 	return start, end
 }
 
@@ -576,6 +582,7 @@ func (m model) modalBoxHitbox() hitbox {
 	modalW := max(28, min(72, bodyW-8))
 	modalH := 8
 	switch m.modal {
+	case noModal:
 	case pathModal:
 		modalH = 6 + len(m.pathOptions)
 		if m.cfgInputActive {
@@ -614,6 +621,7 @@ func (m model) modalInputHitbox() hitbox {
 func (m model) resolveMouseTarget(x, y int) mouseTarget {
 	if m.modal != noModal {
 		switch m.modal {
+		case noModal:
 		case pathModal:
 			if m.cfgInputActive {
 				if m.modalInputHitbox().contains(x, y) {
@@ -636,11 +644,12 @@ func (m model) resolveMouseTarget(x, y int) mouseTarget {
 			if m.modalInputHitbox().contains(x, y) {
 				return mouseTarget{kind: mouseTargetModalInput}
 			}
+		case deleteConfirmModal:
 		}
 		if !m.modalBoxHitbox().contains(x, y) {
 			return mouseTarget{kind: mouseTargetModalOutside}
 		}
-		return mouseTarget{}
+		return mouseTarget{kind: mouseTargetNone}
 	}
 
 	switch m.mode {
@@ -679,13 +688,14 @@ func (m model) resolveMouseTarget(x, y int) mouseTarget {
 			}
 		}
 	}
-	return mouseTarget{}
+	return mouseTarget{kind: mouseTargetNone}
 }
 
 func (m model) mouseHoverMatches(kind mouseTargetKind, index int) bool {
 	return m.hoveredMouse.kind == kind && m.hoveredMouse.index == index
 }
 
+// noinspection GoAssignmentToReceiver
 func (m model) selectSearchResult(index int) model {
 	if index < 0 || index >= len(m.searchRes) {
 		return m
@@ -694,11 +704,12 @@ func (m model) selectSearchResult(index int) model {
 	m.searchInput.Blur()
 	m.searchTable.Focus()
 	m.searchCur = index
-	m.syncSearchTableRows()
+	m = m.syncSearchTableRows()
 	m.searchTable.SetCursor(index)
 	return m
 }
 
+// noinspection GoAssignmentToReceiver
 func (m model) openSelectedDeleteModal(index int) model {
 	if index < 0 || index >= len(m.searchRes) {
 		return m
@@ -718,6 +729,7 @@ func (m model) focusSearchInput() model {
 	return m
 }
 
+// noinspection GoAssignmentToReceiver
 func (m model) activateMenuSelection() (model, tea.Cmd) {
 	switch m.menu[m.menuCursor] {
 	case "Search":
@@ -800,12 +812,13 @@ func (m model) handlePathOptionClick(index int) (model, tea.Cmd) {
 	}
 	next, err := m.saveScanPath(choice)
 	if err != nil {
-		next.err = err
-		return next, nil
+		m.err = err
+		return m, nil
 	}
 	return next.closeModal(), nil
 }
 
+// noinspection GoAssignmentToReceiver
 func (m model) handleThemeOptionClick(index int) (model, tea.Cmd) {
 	if index < 0 || index >= len(m.themes) {
 		return m, nil
@@ -813,7 +826,7 @@ func (m model) handleThemeOptionClick(index int) (model, tea.Cmd) {
 	m.cfgThemeCursor = index
 	m.cfg.Theme = m.themes[index]
 	m.theme = themeByName(m.cfg.Theme)
-	m.resizeComponents()
+	m = m.resizeComponents()
 	if err := config.Save(m.cfg); err != nil {
 		m.err = err
 	} else {
@@ -822,6 +835,7 @@ func (m model) handleThemeOptionClick(index int) (model, tea.Cmd) {
 	return m.closeModal(), nil
 }
 
+// noinspection GoAssignmentToReceiver
 func (m model) scrollSearchResults(delta int) model {
 	if len(m.searchRes) == 0 {
 		return m
@@ -841,6 +855,7 @@ func (m model) scrollConfig(delta int) model {
 
 func (m model) scrollModal(delta int) model {
 	switch m.modal {
+	case noModal:
 	case pathModal:
 		if !m.cfgInputActive && len(m.pathOptions) > 0 {
 			m.cfgPathCursor = min(max(0, m.cfgPathCursor+delta), len(m.pathOptions)-1)
@@ -849,10 +864,12 @@ func (m model) scrollModal(delta int) model {
 		if len(m.themes) > 0 {
 			m.cfgThemeCursor = min(max(0, m.cfgThemeCursor+delta), len(m.themes)-1)
 		}
+	case excludeInputModal, deleteConfirmModal:
 	}
 	return m
 }
 
+// noinspection GoAssignmentToReceiver
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	ev := tea.MouseEvent(msg)
 	target := m.resolveMouseTarget(ev.X, ev.Y)
@@ -872,6 +889,9 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			delta = -1
 		case tea.MouseButtonWheelDown:
 			delta = 1
+		case tea.MouseButtonNone, tea.MouseButtonLeft, tea.MouseButtonMiddle, tea.MouseButtonRight,
+			tea.MouseButtonWheelLeft, tea.MouseButtonWheelRight, tea.MouseButtonBackward,
+			tea.MouseButtonForward, tea.MouseButton10, tea.MouseButton11:
 		}
 		if delta == 0 {
 			return m, nil
@@ -895,8 +915,8 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 
 	if ev.Action == tea.MouseActionRelease {
-		m.pressedMouse = mouseTarget{}
-		m.dragOrigin = mouseTarget{}
+		m.pressedMouse = mouseTarget{kind: mouseTargetNone}
+		m.dragOrigin = mouseTarget{kind: mouseTargetNone}
 		m.hoveredMouse = target
 		return m, nil
 	}
@@ -921,6 +941,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 
 	switch target.kind {
+	case mouseTargetNone:
 	case mouseTargetSettings:
 		m = m.openSettingsView()
 	case mouseTargetStartupProgress:
@@ -961,12 +982,13 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// noinspection GoAssignmentToReceiver
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		m.resizeComponents()
+		m = m.resizeComponents()
 		return m, nil
 
 	case countDoneMsg:
@@ -996,7 +1018,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.searchCur >= len(m.searchRes) {
 				m.searchCur = max(0, len(m.searchRes)-1)
 			}
-			m.syncSearchTableRows()
+			m = m.syncSearchTableRows()
 		}
 		m.err = msg.err
 		return m, nil
@@ -1074,7 +1096,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.status = "delete failed"
 			return m, nil
 		}
-		m.removeDeletedResult(msg.entry)
+		m = m.removeDeletedResult(msg.entry)
 		m.totalIndexed = msg.total
 		m.status = "result deleted"
 		return m, nil
@@ -1172,11 +1194,12 @@ func (m model) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// noinspection GoAssignmentToReceiver
 func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "tab" {
 		m.searchListFocus = !m.searchListFocus
 		if m.searchListFocus {
-			m.syncSearchTableRows()
+			m = m.syncSearchTableRows()
 			m.searchInput.Blur()
 			m.searchTable.Focus()
 		} else {
@@ -1218,6 +1241,7 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmd, debounceCmd(m.searchSeq, q))
 }
 
+// noinspection GoAssignmentToReceiver
 func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	totalRows := 3 + len(m.cfg.Excludes) // 0 scan,1 theme,2 delete mode,3.. excludes
 	maxCursor := totalRows - 1
@@ -1280,8 +1304,8 @@ func (m model) handlePathModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			next, err := m.saveScanPath(value)
 			if err != nil {
-				next.err = err
-				return next, nil
+				m.err = err
+				return m, nil
 			}
 			return next.closeModal(), nil
 		case "esc":
@@ -1309,8 +1333,8 @@ func (m model) handlePathModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		next, err := m.saveScanPath(choice)
 		if err != nil {
-			next.err = err
-			return next, nil
+			m.err = err
+			return m, nil
 		}
 		return next.closeModal(), nil
 	case "esc":
@@ -1319,6 +1343,7 @@ func (m model) handlePathModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// noinspection GoAssignmentToReceiver
 func (m model) handleThemeModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "j", "down":
@@ -1328,7 +1353,7 @@ func (m model) handleThemeModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		m.cfg.Theme = m.themes[m.cfgThemeCursor]
 		m.theme = themeByName(m.cfg.Theme)
-		m.resizeComponents()
+		m = m.resizeComponents()
 		if err := config.Save(m.cfg); err != nil {
 			m.err = err
 		} else {
@@ -1363,6 +1388,7 @@ func (m model) handleExcludeInputModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
+// noinspection GoAssignmentToReceiver
 func (m model) handleDeleteConfirmModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter", "y":
@@ -1401,10 +1427,9 @@ func (m model) saveScanPath(value string) (model, error) {
 	return m, nil
 }
 
-func (m *model) removeDeletedResult(entry db.Entry) {
+func (m model) removeDeletedResult(entry db.Entry) model {
 	if len(m.searchRes) == 0 {
-		m.syncSearchTableRows()
-		return
+		return m.syncSearchTableRows()
 	}
 	clean := filepath.Clean(entry.Path)
 	filtered := m.searchRes[:0]
@@ -1424,11 +1449,12 @@ func (m *model) removeDeletedResult(entry db.Entry) {
 	} else if m.searchCur >= len(m.searchRes) {
 		m.searchCur = len(m.searchRes) - 1
 	}
-	m.syncSearchTableRows()
+	return m.syncSearchTableRows()
 }
 
+// noinspection GoAssignmentToReceiver
 func (m model) View() string {
-	m.resizeComponents()
+	m = m.resizeComponents()
 	return m.renderFrame()
 }
 
@@ -1566,7 +1592,7 @@ func (m model) renderTopBar() string {
 		Render(m.theme.Muted.Render(lastPlain))
 	statusView := ""
 	if m.busy {
-		statusText := m.theme.Highlight.Copy().Bold(true).Render("● scanning")
+		statusText := m.theme.Highlight.Bold(true).Render("● scanning")
 		statusView = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(m.theme.BorderHi).
@@ -1649,7 +1675,7 @@ func (m model) viewMenu(width int) string {
 	renderCard := func(card menuCard, active bool, hovered bool) string {
 		base := m.itemStyleState(active, hovered).Width(max(28, min(54, width-6)))
 
-		title := m.theme.Text.Copy().Bold(true).Render(card.Title)
+		title := m.theme.Text.Bold(true).Render(card.Title)
 		desc := m.theme.Muted.Render(card.Desc)
 		hotkey := m.badgeStyle().Render(card.Hotkey)
 		body := lipgloss.JoinHorizontal(
@@ -1752,16 +1778,7 @@ func (m model) renderSearchResults() string {
 		return strings.Join(lines, "\n")
 	}
 
-	cursor := min(max(0, m.searchTable.Cursor()), len(m.searchRes)-1)
-	visibleRows := max(1, m.searchTable.Height())
-	start := 0
-	if cursor >= visibleRows {
-		start = cursor - visibleRows + 1
-	}
-	end := min(len(m.searchRes), start+visibleRows)
-	if end-start < visibleRows {
-		start = max(0, end-visibleRows)
-	}
+	cursor, start, end := m.searchVisibleWindow()
 
 	for i := start; i < end; i++ {
 		row := padToWidth(m.renderSearchCells(cols, searchEntryValues(m.searchRes[i])), tableW)
@@ -2066,7 +2083,7 @@ func searchCmd(ctx context.Context, dbPath, query string) tea.Cmd {
 		if err != nil {
 			return searchDoneMsg{query: query, err: err}
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		res, err := store.SearchAdvanced(ctx, db.SearchOptions{
 			Query:  query,
 			Limit:  100,
@@ -2082,7 +2099,7 @@ func countCmd(ctx context.Context, dbPath string) tea.Cmd {
 		if err != nil {
 			return countDoneMsg{err: err}
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		total, err := store.Count(ctx)
 		return countDoneMsg{total: total, err: err}
 	}
@@ -2116,7 +2133,7 @@ func deleteResultCmd(ctx context.Context, cfg config.Config, entry db.Entry, ind
 		if err != nil {
 			return deleteResultDoneMsg{index: index, entry: entry, err: err}
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 
 		if isDir {
 			err = store.DeleteByPrefix(ctx, entry.Path)
@@ -2158,7 +2175,7 @@ func reindexCmd(ctx context.Context, cfg config.Config, roots []string, progress
 		if err != nil {
 			return reindexDoneMsg{err: err}
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 
 		if err := store.ReindexFTS(ctx); err != nil {
 			return reindexDoneMsg{err: err}
@@ -2181,7 +2198,7 @@ func scanRootsCmd(ctx context.Context, cfg config.Config, roots []string, label 
 		if err != nil {
 			return scanDoneMsg{err: err, label: label}
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 
 		r := scanner.Runner{
 			Indexer:  store,
@@ -2287,17 +2304,17 @@ func themeByName(name string) theme {
 			Highlight: lipgloss.NewStyle().Foreground(lipgloss.Color("#83a598")).Bold(true),
 			Err:       lipgloss.NewStyle().Foreground(lipgloss.Color("#fb4934")).Bold(true),
 			Warn:      lipgloss.NewStyle().Foreground(lipgloss.Color("#fe8019")).Bold(true),
-			Border:    lipgloss.Color("#504945"),
-			BorderHi:  lipgloss.Color("#83a598"),
-			SurfaceBG: lipgloss.Color("#282828"),
-			Badge:     lipgloss.Color("#665c54"),
-			Input:     lipgloss.Color("#83a598"),
-			InputBG:   lipgloss.Color("#3c3836"),
-			InputFG:   lipgloss.Color("#ebdbb2"),
-			SelectBG:  lipgloss.Color("#3c3836"),
-			SelectFG:  lipgloss.Color("#fbf1c7"),
-			BusyFG:    lipgloss.Color("#b8bb26"),
-			BusyBG:    lipgloss.Color("#3c3836"),
+			Border:    "#504945",
+			BorderHi:  "#83a598",
+			SurfaceBG: "#282828",
+			Badge:     "#665c54",
+			Input:     "#83a598",
+			InputBG:   "#3c3836",
+			InputFG:   "#ebdbb2",
+			SelectBG:  "#3c3836",
+			SelectFG:  "#fbf1c7",
+			BusyFG:    "#b8bb26",
+			BusyBG:    "#3c3836",
 		}
 	case "catppuccin":
 		return theme{
@@ -2309,17 +2326,17 @@ func themeByName(name string) theme {
 			Highlight: lipgloss.NewStyle().Foreground(lipgloss.Color("#94e2d5")).Bold(true),
 			Err:       lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8")).Bold(true),
 			Warn:      lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
-			Border:    lipgloss.Color("#45475a"),
-			BorderHi:  lipgloss.Color("#89dceb"),
-			SurfaceBG: lipgloss.Color("#1e1e2e"),
-			Badge:     lipgloss.Color("#585b70"),
-			Input:     lipgloss.Color("#89dceb"),
-			InputBG:   lipgloss.Color("#313244"),
-			InputFG:   lipgloss.Color("#f5e0dc"),
-			SelectBG:  lipgloss.Color("#313244"),
-			SelectFG:  lipgloss.Color("#f5e0dc"),
-			BusyFG:    lipgloss.Color("#a6e3a1"),
-			BusyBG:    lipgloss.Color("#313244"),
+			Border:    "#45475a",
+			BorderHi:  "#89dceb",
+			SurfaceBG: "#1e1e2e",
+			Badge:     "#585b70",
+			Input:     "#89dceb",
+			InputBG:   "#313244",
+			InputFG:   "#f5e0dc",
+			SelectBG:  "#313244",
+			SelectFG:  "#f5e0dc",
+			BusyFG:    "#a6e3a1",
+			BusyBG:    "#313244",
 		}
 	default:
 		return theme{
@@ -2331,17 +2348,17 @@ func themeByName(name string) theme {
 			Highlight: lipgloss.NewStyle().Foreground(lipgloss.Color("#9ece6a")).Bold(true),
 			Err:       lipgloss.NewStyle().Foreground(lipgloss.Color("#f7768e")).Bold(true),
 			Warn:      lipgloss.NewStyle().Foreground(lipgloss.Color("#e0af68")).Bold(true),
-			Border:    lipgloss.Color("#2d3655"),
-			BorderHi:  lipgloss.Color("#5a86ff"),
-			SurfaceBG: lipgloss.Color("#1b2138"),
-			Badge:     lipgloss.Color("#3a4668"),
-			Input:     lipgloss.Color("#356cff"),
-			InputBG:   lipgloss.Color("#2f3b63"),
-			InputFG:   lipgloss.Color("#ffffff"),
-			SelectBG:  lipgloss.Color("#2f3b63"),
-			SelectFG:  lipgloss.Color("#ffffff"),
-			BusyFG:    lipgloss.Color("#9ece6a"),
-			BusyBG:    lipgloss.Color("#1f2335"),
+			Border:    "#2d3655",
+			BorderHi:  "#5a86ff",
+			SurfaceBG: "#1b2138",
+			Badge:     "#3a4668",
+			Input:     "#356cff",
+			InputBG:   "#2f3b63",
+			InputFG:   "#ffffff",
+			SelectBG:  "#2f3b63",
+			SelectFG:  "#ffffff",
+			BusyFG:    "#9ece6a",
+			BusyBG:    "#1f2335",
 		}
 	}
 }

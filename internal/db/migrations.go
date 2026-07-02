@@ -26,6 +26,7 @@ type MigrationStatus struct {
 }
 
 func applyMigrations(ctx context.Context, sqlDB *sql.DB) error {
+	//noinspection GoResourceLeak
 	provider, err := gooseProvider(sqlDB)
 	if err != nil {
 		return err
@@ -35,6 +36,7 @@ func applyMigrations(ctx context.Context, sqlDB *sql.DB) error {
 }
 
 func currentSchemaVersion(ctx context.Context, sqlDB *sql.DB) (int64, error) {
+	//noinspection GoResourceLeak
 	provider, err := gooseProvider(sqlDB)
 	if err != nil {
 		return 0, err
@@ -43,6 +45,7 @@ func currentSchemaVersion(ctx context.Context, sqlDB *sql.DB) (int64, error) {
 }
 
 func collectMigrationStatus(ctx context.Context, sqlDB *sql.DB) ([]MigrationStatus, error) {
+	//noinspection GoResourceLeak
 	provider, err := gooseProvider(sqlDB)
 	if err != nil {
 		return nil, err
@@ -94,7 +97,7 @@ func Migrate(ctx context.Context, dbPath string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	if err := store.setup(ctx); err != nil {
 		return 0, err
@@ -108,7 +111,7 @@ func SchemaVersion(ctx context.Context, dbPath string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	if err := store.applyPragmas(ctx); err != nil {
 		return 0, err
@@ -121,7 +124,7 @@ func SchemaStatus(ctx context.Context, dbPath string) ([]MigrationStatus, error)
 	if err != nil {
 		return nil, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	if err := store.applyPragmas(ctx); err != nil {
 		return nil, err

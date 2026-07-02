@@ -17,7 +17,7 @@ func main() {
 
 	if err := app.NewRootCommand().ExecuteContext(ctx); err != nil {
 		if !errors.Is(err, context.Canceled) {
-			fmt.Fprintln(os.Stderr, err)
+			_, _ = fmt.Fprintln(os.Stderr, err)
 		}
 		os.Exit(1)
 	}
