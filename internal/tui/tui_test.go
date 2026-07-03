@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -51,7 +52,7 @@ func TestNewModelStartsInStartupView(t *testing.T) {
 	}
 }
 
-func TestSlashFromConfigFocusesSearch(t *testing.T) {
+func TestSlashFromConfigDoesNotFocusSearch(t *testing.T) {
 	t.Parallel()
 
 	m := newModel(context.Background(), config.Config{
@@ -64,8 +65,8 @@ func TestSlashFromConfigFocusesSearch(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	next := updated.(model)
-	if next.mode != viewSearch {
-		t.Fatalf("expected search mode, got %v", next.mode)
+	if next.mode != viewConfig {
+		t.Fatalf("expected config mode, got %v", next.mode)
 	}
 }
 
@@ -134,7 +135,131 @@ func TestSearchInputAllowsTypingDWhenInputFocused(t *testing.T) {
 	}
 }
 
-func TestSearchListFocusUsesJKForNavigation(t *testing.T) {
+func TestSearchInputAllowsTypingSlash(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+	})
+	m.mode = viewSearch
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
+	next := updated.(model)
+	if next.searchInput.Value() != "/" {
+		t.Fatalf("expected slash to be typed in input, got %q", next.searchInput.Value())
+	}
+}
+
+func TestSearchTabDoesNotSwitchFocus(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+	})
+	m.mode = viewSearch
+	m.searchInput.SetValue("a")
+	m.searchSeq = 7
+	m.searchRes = []db.Entry{
+		{Name: "a", Path: "/tmp/a"},
+		{Name: "b", Path: "/tmp/b"},
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	next := updated.(model)
+	if next.searchInput.Value() != "a" {
+		t.Fatalf("expected tab to leave input value unchanged, got %q", next.searchInput.Value())
+	}
+	if next.searchCur != 0 || next.searchTable.Cursor() != 0 {
+		t.Fatalf("expected tab to leave selection unchanged, searchCur=%d tableCursor=%d", next.searchCur, next.searchTable.Cursor())
+	}
+	if next.searchSeq != 7 {
+		t.Fatalf("expected tab not to trigger search debounce, got seq %d", next.searchSeq)
+	}
+}
+
+func TestSearchInputArrowDownNavigatesResults(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+	})
+	m.mode = viewSearch
+	m.searchInput.SetValue("a")
+	m.searchRes = []db.Entry{
+		{Name: "a", Path: "/tmp/a"},
+		{Name: "b", Path: "/tmp/b"},
+	}
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next := updated.(model)
+	if next.searchCur != 1 || next.searchTable.Cursor() != 1 {
+		t.Fatalf("expected cursor to move to 1, searchCur=%d tableCursor=%d", next.searchCur, next.searchTable.Cursor())
+	}
+	if next.searchInput.Value() != "a" {
+		t.Fatalf("expected input value to stay unchanged, got %q", next.searchInput.Value())
+	}
+}
+
+func TestSearchInputArrowUpNavigatesResults(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+	})
+	m.mode = viewSearch
+	m.searchInput.SetValue("b")
+	m.searchRes = []db.Entry{
+		{Name: "a", Path: "/tmp/a"},
+		{Name: "b", Path: "/tmp/b"},
+	}
+	m.searchCur = 1
+	m = m.syncSearchTableRows()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
+	next := updated.(model)
+	if next.searchCur != 0 || next.searchTable.Cursor() != 0 {
+		t.Fatalf("expected cursor to move to 0, searchCur=%d tableCursor=%d", next.searchCur, next.searchTable.Cursor())
+	}
+	if next.searchInput.Value() != "b" {
+		t.Fatalf("expected input value to stay unchanged, got %q", next.searchInput.Value())
+	}
+}
+
+func TestSearchInputArrowDownWithoutResultsKeepsInput(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+	})
+	m.mode = viewSearch
+	m.searchInput.SetValue("missing")
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next := updated.(model)
+	if next.searchInput.Value() != "missing" {
+		t.Fatalf("expected input value to stay unchanged, got %q", next.searchInput.Value())
+	}
+	if next.searchCur != 0 || next.searchTable.Cursor() != 0 {
+		t.Fatalf("expected cursor to stay at 0, searchCur=%d tableCursor=%d", next.searchCur, next.searchTable.Cursor())
+	}
+}
+
+func TestSearchInputEnterOpensArrowSelectedResult(t *testing.T) {
 	t.Parallel()
 
 	m := newModel(context.Background(), config.Config{
@@ -149,16 +274,16 @@ func TestSearchListFocusUsesJKForNavigation(t *testing.T) {
 		{Name: "b", Path: "/tmp/b"},
 	}
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
 	next := updated.(model)
-	if !next.searchListFocus {
-		t.Fatalf("expected list focus after tab")
-	}
-
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
+	updated, cmd := next.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next = updated.(model)
+
 	if next.searchCur != 1 {
-		t.Fatalf("expected cursor to move to 1, got %d", next.searchCur)
+		t.Fatalf("expected selected cursor to stay at 1, got %d", next.searchCur)
+	}
+	if cmd == nil {
+		t.Fatalf("expected enter to open selected result")
 	}
 }
 
@@ -191,7 +316,7 @@ func TestSearchResultSelectionRendersFullRowWidth(t *testing.T) {
 	t.Fatalf("selected row not found in rendered results:\n%s", out)
 }
 
-func TestSearchListDOpensDeleteConfirmationAndCancelKeepsResults(t *testing.T) {
+func TestSearchCtrlDOpensDeleteConfirmationAndCancelKeepsResults(t *testing.T) {
 	t.Parallel()
 
 	m := newModel(context.Background(), config.Config{
@@ -205,10 +330,8 @@ func TestSearchListDOpensDeleteConfirmationAndCancelKeepsResults(t *testing.T) {
 	m.searchRes = []db.Entry{{Name: "delete-me.txt", Path: "/tmp/delete-me.txt"}}
 	m = m.syncSearchTableRows()
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyTab})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlD})
 	next := updated.(model)
-	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
-	next = updated.(model)
 
 	if next.modal != deleteConfirmModal || !next.hasDeleteTarget {
 		t.Fatalf("expected delete confirmation modal, modal=%v hasTarget=%v", next.modal, next.hasDeleteTarget)
@@ -225,6 +348,27 @@ func TestSearchListDOpensDeleteConfirmationAndCancelKeepsResults(t *testing.T) {
 	}
 	if len(next.searchRes) != 1 {
 		t.Fatalf("expected cancel to keep result, got %d results", len(next.searchRes))
+	}
+}
+
+func TestSearchDeleteKeyOpensDeleteConfirmation(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+		DeleteMode:      config.DeleteModeTrash,
+	})
+	m.mode = viewSearch
+	m.searchRes = []db.Entry{{Name: "delete-me.txt", Path: "/tmp/delete-me.txt"}}
+	m = m.syncSearchTableRows()
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDelete})
+	next := updated.(model)
+	if next.modal != deleteConfirmModal || !next.hasDeleteTarget {
+		t.Fatalf("expected delete key to open confirmation, modal=%v hasTarget=%v", next.modal, next.hasDeleteTarget)
 	}
 }
 
@@ -315,7 +459,7 @@ func TestCountDoneAlwaysStartsInitialScanFromDefaultPath(t *testing.T) {
 	}
 }
 
-func TestStartupViewIsMinimalByDefault(t *testing.T) {
+func TestStartupViewShowsProgressByDefault(t *testing.T) {
 	t.Parallel()
 
 	m := newModel(context.Background(), config.Config{
@@ -329,17 +473,19 @@ func TestStartupViewIsMinimalByDefault(t *testing.T) {
 	m.activeScanLabel = "initial-scan"
 
 	out := m.View()
-	if !strings.Contains(out, "Scanning before search opens") || !strings.Contains(out, "Press Space for progress") {
-		t.Fatalf("expected minimal startup scanning message, got:\n%s", out)
+	for _, want := range []string{"Scanning before search opens", "PROGRESS", "scanned: 0", "indexed: 0", "skipped: 0", "waiting for first path"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("expected %q in startup progress view, got:\n%s", want, out)
+		}
 	}
-	for _, hidden := range []string{"GoEverything", "status:", "keys:", "Scan location", "Search will open automatically", "PROGRESS", "scanned:"} {
+	for _, hidden := range []string{"GoEverything", "status:", "keys:", "Scan location", "Search will open automatically", "Press Space"} {
 		if strings.Contains(out, hidden) {
-			t.Fatalf("did not expect %q in minimal startup view, got:\n%s", hidden, out)
+			t.Fatalf("did not expect %q in startup progress view, got:\n%s", hidden, out)
 		}
 	}
 }
 
-func TestStartupSpaceTogglesProgressDetails(t *testing.T) {
+func TestStartupSpaceDoesNotHideProgress(t *testing.T) {
 	t.Parallel()
 
 	m := newModel(context.Background(), config.Config{
@@ -361,9 +507,6 @@ func TestStartupSpaceTogglesProgressDetails(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeySpace})
 	next := updated.(model)
-	if !next.showScanProgress {
-		t.Fatalf("expected progress details to be shown")
-	}
 	out := next.View()
 	for _, want := range []string{"PROGRESS", "scanned: 10", "indexed: 8", "skipped: 2", "current: /tmp/current-file.txt"} {
 		if !strings.Contains(out, want) {
@@ -378,8 +521,9 @@ func TestStartupSpaceTogglesProgressDetails(t *testing.T) {
 
 	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeySpace})
 	next = updated.(model)
-	if next.showScanProgress {
-		t.Fatalf("expected progress details to be hidden")
+	out = next.View()
+	if !strings.Contains(out, "PROGRESS") || !strings.Contains(out, "scanned: 10") {
+		t.Fatalf("expected space to leave progress visible, got:\n%s", out)
 	}
 }
 
@@ -477,9 +621,6 @@ func TestInitialScanSuccessOpensSearch(t *testing.T) {
 	}
 	if next.busy {
 		t.Fatalf("expected startup scan to stop being busy")
-	}
-	if next.searchListFocus {
-		t.Fatalf("expected search input focus after startup scan")
 	}
 	if cmd == nil {
 		t.Fatalf("expected count refresh command")
@@ -620,6 +761,17 @@ func renderedLineForSearchRow(t *testing.T, m model, index int) int {
 	return 0
 }
 
+func renderedHelpLine(t *testing.T, m model) int {
+	t.Helper()
+	for y, line := range strings.Split(m.View(), "\n") {
+		if strings.Contains(line, "keys:") {
+			return y
+		}
+	}
+	t.Fatalf("could not find help line in view:\n%s", m.View())
+	return 0
+}
+
 func modelWithManySearchRows() model {
 	m := newModel(context.Background(), config.Config{
 		DBPath:          "/tmp/test.db",
@@ -676,8 +828,8 @@ func TestMouseHoverTracksInteractiveTargetsWithoutActivating(t *testing.T) {
 	if next.hoveredMouse.kind != mouseTargetSearchResult || next.hoveredMouse.index != 1 {
 		t.Fatalf("expected search result hover, got %#v", next.hoveredMouse)
 	}
-	if next.searchCur != 0 || next.searchListFocus {
-		t.Fatalf("hover should not select result, cursor=%d focus=%v", next.searchCur, next.searchListFocus)
+	if next.searchCur != 0 {
+		t.Fatalf("hover should not select result, cursor=%d", next.searchCur)
 	}
 }
 
@@ -802,8 +954,8 @@ func TestSearchResultMouseClickDoubleClickAndRightClick(t *testing.T) {
 	if cmd != nil {
 		t.Fatalf("did not expect open command on first click")
 	}
-	if !next.searchListFocus || next.searchCur != 1 || next.searchTable.Cursor() != 1 {
-		t.Fatalf("expected first click to select row 1, focus=%v searchCur=%d tableCursor=%d", next.searchListFocus, next.searchCur, next.searchTable.Cursor())
+	if next.searchCur != 1 || next.searchTable.Cursor() != 1 {
+		t.Fatalf("expected first click to select row 1, searchCur=%d tableCursor=%d", next.searchCur, next.searchTable.Cursor())
 	}
 
 	updated, cmd = next.Update(mouseEventIn(next.searchResultHitbox(1), tea.MouseActionPress, tea.MouseButtonLeft))
@@ -816,6 +968,30 @@ func TestSearchResultMouseClickDoubleClickAndRightClick(t *testing.T) {
 	next = updated.(model)
 	if next.modal != deleteConfirmModal || !next.hasDeleteTarget || next.deleteIndex != 0 {
 		t.Fatalf("expected right-click to open delete confirmation for row 0, modal=%v hasTarget=%v deleteIndex=%d", next.modal, next.hasDeleteTarget, next.deleteIndex)
+	}
+}
+
+func TestSearchResultRightReleaseOpensDeleteConfirmation(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+		DeleteMode:      config.DeleteModeTrash,
+	})
+	m.mode = viewSearch
+	m.searchRes = []db.Entry{
+		{Name: "a.txt", Path: "/tmp/a.txt"},
+		{Name: "b.txt", Path: "/tmp/b.txt"},
+	}
+	m = m.syncSearchTableRows()
+
+	updated, _ := m.Update(mouseEventIn(m.searchResultHitbox(1), tea.MouseActionRelease, tea.MouseButtonRight))
+	next := updated.(model)
+	if next.modal != deleteConfirmModal || !next.hasDeleteTarget || next.deleteIndex != 1 {
+		t.Fatalf("expected right release to open delete confirmation for row 1, modal=%v hasTarget=%v deleteIndex=%d", next.modal, next.hasDeleteTarget, next.deleteIndex)
 	}
 }
 
@@ -1014,6 +1190,83 @@ func TestSearchViewRendersTableResults(t *testing.T) {
 	if strings.Contains(out, "path-filter") || strings.Contains(strings.ToLower(out), "ctrl+p") {
 		t.Fatalf("did not expect path filter UI/help in search view, got:\n%s", out)
 	}
+	lower := strings.ToLower(out)
+	for _, want := range []string{"ctrl+d/delete/right-click delete", "enter/double-click open", "ctrl+q quit"} {
+		if !strings.Contains(lower, want) {
+			t.Fatalf("expected %q in search help, got:\n%s", want, out)
+		}
+	}
+	for _, hidden := range []string{"ctrl+s settings", "delete remove"} {
+		if strings.Contains(lower, hidden) {
+			t.Fatalf("did not expect %q in search help, got:\n%s", hidden, out)
+		}
+	}
+}
+
+func TestSearchViewEmptyResultsUsesStableResultsArea(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+	})
+	m.mode = viewSearch
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 36})
+	m = updated.(model)
+
+	out := m.renderEmptySearchResults()
+	if !strings.Contains(out, "No results") {
+		t.Fatalf("expected empty results message, got:\n%s", out)
+	}
+	if got, want := lipgloss.Height(out), m.searchTable.Height()+1; got != want {
+		t.Fatalf("expected empty results block height %d, got %d", want, got)
+	}
+	lines := strings.Split(out, "\n")
+	if strings.Contains(lines[0], "No results") {
+		t.Fatalf("expected empty message to be vertically centered, got:\n%s", out)
+	}
+}
+
+func TestSearchHelpLineStaysFixedWithFewOrManyResults(t *testing.T) {
+	t.Parallel()
+
+	few := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+	})
+	few.mode = viewSearch
+	few.searchRes = []db.Entry{
+		{Name: "Terraria", Path: `C:\Users\andre\Documents\My Games`, IsDir: true},
+		{Name: "Terraria.url", Path: `C:\Users\andre\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Steam`, Size: 200},
+	}
+	updated, _ := few.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	few = updated.(model).syncSearchTableRows()
+
+	many := newModel(context.Background(), few.cfg)
+	many.mode = viewSearch
+	for i := 0; i < 40; i++ {
+		many.searchRes = append(many.searchRes, db.Entry{
+			Name: fmt.Sprintf("row-%02d.md", i),
+			Path: fmt.Sprintf("/tmp/specs/APP-%04d", i),
+			Size: int64(i + 1),
+		})
+	}
+	updated, _ = many.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
+	many = updated.(model).syncSearchTableRows()
+
+	fewHelp := renderedHelpLine(t, few)
+	manyHelp := renderedHelpLine(t, many)
+	if fewHelp != manyHelp {
+		t.Fatalf("expected help line to stay fixed, few=%d many=%d\nfew:\n%s\nmany:\n%s", fewHelp, manyHelp, few.View(), many.View())
+	}
+	lines := strings.Split(few.View(), "\n")
+	if fewHelp < len(lines)-3 {
+		t.Fatalf("expected help line near bottom, got line %d of %d\n%s", fewHelp, len(lines), few.View())
+	}
 }
 
 func TestSearchCtrlPNoLongerTogglesPathFilter(t *testing.T) {
@@ -1035,6 +1288,31 @@ func TestSearchCtrlPNoLongerTogglesPathFilter(t *testing.T) {
 	out := next.View()
 	if strings.Contains(out, "path-filter") || strings.Contains(strings.ToLower(out), "ctrl+p") {
 		t.Fatalf("did not expect path filter UI/help after ctrl+p, got:\n%s", out)
+	}
+}
+
+func TestOpenCommandRevealsPathByPlatform(t *testing.T) {
+	t.Parallel()
+
+	path := "/tmp/report.txt"
+	if runtime.GOOS == "windows" {
+		path = `C:\Users\andre\Documents\report.txt`
+	}
+
+	cmd := openCommand(path, true)
+	switch runtime.GOOS {
+	case "windows":
+		if len(cmd.Args) != 2 || cmd.Args[0] != "explorer.exe" || cmd.Args[1] != "/select,"+path {
+			t.Fatalf("expected explorer reveal command, got %#v", cmd.Args)
+		}
+	case "darwin":
+		if len(cmd.Args) != 3 || cmd.Args[0] != "open" || cmd.Args[1] != "-R" || cmd.Args[2] != path {
+			t.Fatalf("expected macOS reveal command, got %#v", cmd.Args)
+		}
+	default:
+		if len(cmd.Args) != 2 || cmd.Args[0] != "xdg-open" || cmd.Args[1] != "/tmp" {
+			t.Fatalf("expected xdg-open parent command, got %#v", cmd.Args)
+		}
 	}
 }
 

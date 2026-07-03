@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"sync"
@@ -91,7 +92,6 @@ type mouseTargetKind int
 const (
 	mouseTargetNone mouseTargetKind = iota
 	mouseTargetSettings
-	mouseTargetStartupProgress
 	mouseTargetSearchInput
 	mouseTargetSearchResult
 	mouseTargetConfigRow
@@ -168,7 +168,6 @@ type model struct {
 	searchRes   []db.Entry
 	searchCur   int
 
-	searchListFocus bool
 	deleteIndex     int
 	deleteTarget    db.Entry
 	hasDeleteTarget bool
@@ -191,7 +190,6 @@ type model struct {
 	err                  error
 	scanCancel           context.CancelFunc
 	startupScanAttempted bool
-	showScanProgress     bool
 	scanProgress         scanner.Progress
 	scanSession          int
 	scanProgressSource   *scanProgressSource
@@ -339,7 +337,6 @@ func (m model) syncSearchTableRows() model {
 
 func (m model) focusSearchView() model {
 	m.mode = viewSearch
-	m.searchListFocus = false
 	m.searchInput.Focus()
 	m.searchTable.Blur()
 	return m
@@ -347,7 +344,6 @@ func (m model) focusSearchView() model {
 
 func (m model) openSettingsView() model {
 	m.mode = viewConfig
-	m.searchListFocus = false
 	m.searchInput.Blur()
 	m.searchTable.Blur()
 	return m
@@ -369,22 +365,6 @@ func (m model) contentStartY() int {
 
 func (m model) contentStartX() int {
 	return 2
-}
-
-func (m model) startupProgressHitbox() hitbox {
-	bodyW, bodyH := m.bodySize()
-	cardW := max(32, min(78, bodyW-4))
-	cardH := 5
-	if m.showScanProgress {
-		cardH = 14
-	}
-	cardH = max(3, min(cardH, bodyH-2))
-	return hitbox{
-		x: m.contentStartX() + max(0, (bodyW-cardW)/2),
-		y: 1 + max(0, (bodyH-cardH)/2),
-		w: cardW,
-		h: cardH,
-	}
 }
 
 func (m model) searchInputHitbox() hitbox {
@@ -457,10 +437,7 @@ func (m model) searchBoxView() string {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.Input).
 		Padding(0, 1)
-	inputText := m.searchInput.View()
-	if !m.searchListFocus {
-		inputText = m.inputFocusStyle().Render(inputText)
-	}
+	inputText := m.inputFocusStyle().Render(m.searchInput.View())
 	boxLine := lipgloss.JoinHorizontal(lipgloss.Top, "🔎 ", inputText, "   ", m.theme.Muted.Render(fmt.Sprintf("%d results", len(m.searchRes))))
 	return searchBox.Render(boxLine)
 }
@@ -617,9 +594,6 @@ func (m model) resolveMouseTarget(x, y int) mouseTarget {
 
 	switch m.mode {
 	case viewStartup:
-		if m.startupProgressHitbox().contains(x, y) {
-			return mouseTarget{kind: mouseTargetStartupProgress}
-		}
 	case viewSearch:
 		if m.settingsButtonHitbox().contains(x, y) {
 			return mouseTarget{kind: mouseTargetSettings}
@@ -657,11 +631,22 @@ func (m model) selectSearchResult(index int) model {
 	if index < 0 || index >= len(m.searchRes) {
 		return m
 	}
-	m.searchListFocus = true
-	m.searchInput.Blur()
-	m.searchTable.Focus()
 	m.searchCur = index
 	m = m.syncSearchTableRows()
+	m.searchTable.SetCursor(index)
+	m.searchInput.Focus()
+	m.searchTable.Blur()
+	return m
+}
+
+// noinspection GoAssignmentToReceiver
+func (m model) setSearchCursor(index int) model {
+	if len(m.searchRes) == 0 {
+		return m
+	}
+	m = m.syncSearchTableRows()
+	index = min(max(0, index), len(m.searchRes)-1)
+	m.searchCur = index
 	m.searchTable.SetCursor(index)
 	return m
 }
@@ -680,7 +665,6 @@ func (m model) openSelectedDeleteModal(index int) model {
 }
 
 func (m model) focusSearchInput() model {
-	m.searchListFocus = false
 	m.searchInput.Focus()
 	m.searchTable.Blur()
 	return m
@@ -832,13 +816,21 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		}
 		switch m.mode {
 		case viewStartup:
-			m.showScanProgress = true
 		case viewSearch:
 			m = m.scrollSearchResults(delta)
 		case viewConfig:
 			m = m.scrollConfig(delta)
 		}
 		return m, nil
+	}
+
+	rightClick := ev.Button == tea.MouseButtonRight && (ev.Action == tea.MouseActionPress || ev.Action == tea.MouseActionRelease)
+	if rightClick && target.kind == mouseTargetSearchResult {
+		return m.openSelectedDeleteModal(target.index), nil
+	}
+	if rightClick && target.kind == mouseTargetConfigExclude {
+		m.cfgCursor = target.index + 3
+		return m.removeExcludeAt(target.index), nil
 	}
 
 	if ev.Action == tea.MouseActionRelease {
@@ -856,13 +848,6 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	m.dragOrigin = target
 	m.hoveredMouse = target
 
-	if ev.Button == tea.MouseButtonRight && target.kind == mouseTargetSearchResult {
-		return m.openSelectedDeleteModal(target.index), nil
-	}
-	if ev.Button == tea.MouseButtonRight && target.kind == mouseTargetConfigExclude {
-		m.cfgCursor = target.index + 3
-		return m.removeExcludeAt(target.index), nil
-	}
 	if ev.Button != tea.MouseButtonLeft {
 		return m, nil
 	}
@@ -871,8 +856,6 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case mouseTargetNone:
 	case mouseTargetSettings:
 		m = m.openSettingsView()
-	case mouseTargetStartupProgress:
-		m.showScanProgress = !m.showScanProgress
 	case mouseTargetSearchInput:
 		m = m.focusSearchInput()
 	case mouseTargetSearchResult:
@@ -1037,9 +1020,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == viewStartup {
 			switch msg.String() {
 			case "ctrl+x":
-			case " ", "space":
-				m.showScanProgress = !m.showScanProgress
-				return m, nil
 			default:
 				return m, nil
 			}
@@ -1072,17 +1052,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m = m.focusSearchView()
 				return m, nil
 			}
-		case "/":
-			if m.mode == viewStartup {
-				return m, nil
-			}
-			if m.mode != viewSearch {
-				m.mode = viewSearch
-			}
-			m.searchListFocus = false
-			m.searchInput.Focus()
-			m.searchTable.Blur()
-			return m, nil
 		}
 
 		switch m.mode {
@@ -1100,42 +1069,30 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // noinspection GoAssignmentToReceiver
 func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if msg.String() == "tab" {
-		m.searchListFocus = !m.searchListFocus
-		if m.searchListFocus {
-			m = m.syncSearchTableRows()
-			m.searchInput.Blur()
-			m.searchTable.Focus()
-		} else {
-			m.searchInput.Focus()
-			m.searchTable.Blur()
+	switch msg.String() {
+	case "tab":
+		return m, nil
+	case "up":
+		m = m.setSearchCursor(m.searchCur - 1)
+		return m, nil
+	case "down":
+		m = m.setSearchCursor(m.searchCur + 1)
+		return m, nil
+	case "enter":
+		if len(m.searchRes) > 0 {
+			m = m.setSearchCursor(m.searchCur)
+			return m, openCmd(m.searchRes[m.searchCur].Path, true)
 		}
 		return m, nil
-	}
-
-	if m.searchListFocus {
-		switch msg.String() {
-		case "enter":
-			if len(m.searchRes) > 0 {
-				m.searchCur = m.searchTable.Cursor()
-				path := m.searchRes[m.searchCur].Path
-				return m, openCmd(path, true)
-			}
-			return m, nil
-		case "d":
-			if len(m.searchRes) > 0 {
-				m.searchCur = min(max(0, m.searchTable.Cursor()), len(m.searchRes)-1)
-				m.deleteIndex = m.searchCur
-				m.deleteTarget = m.searchRes[m.searchCur]
-				m.hasDeleteTarget = true
-				m.modal = deleteConfirmModal
-			}
+	case "ctrl+d", "delete":
+		if len(m.searchRes) > 0 {
+			m = m.setSearchCursor(m.searchCur)
+			m.deleteIndex = m.searchCur
+			m.deleteTarget = m.searchRes[m.searchCur]
+			m.hasDeleteTarget = true
+			m.modal = deleteConfirmModal
 			return m, nil
 		}
-		var cmd tea.Cmd
-		m.searchTable, cmd = m.searchTable.Update(msg)
-		m.searchCur = max(0, m.searchTable.Cursor())
-		return m, cmd
 	}
 
 	var cmd tea.Cmd
@@ -1381,18 +1338,26 @@ func (m model) renderFrame() string {
 			Render(body)
 	}
 
-	parts := make([]string, 0, 4)
-	parts = append(parts, m.renderTopBar())
-
+	top := m.renderTopBar()
 	help := m.renderHelp()
-	contentH := m.contentHeight()
+	errLine := m.renderError()
+	contentH := max(3, bodyH-lipgloss.Height(top)-lipgloss.Height(errLine)-lipgloss.Height(help))
 	content := m.renderContent(bodyW, contentH)
 	if m.modal != noModal {
 		content = m.renderModal(bodyW, contentH)
 	}
+	content = padBlockHeight(content, contentH, bodyW)
+
+	parts := make([]string, 0, 5)
+	parts = append(parts, top)
 	parts = append(parts, content)
-	if errLine := m.renderError(); errLine != "" {
+	if errLine != "" {
 		parts = append(parts, errLine)
+	}
+	prefixH := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, parts...))
+	spacerH := max(0, bodyH-prefixH-lipgloss.Height(help))
+	if spacerH > 0 {
+		parts = append(parts, blankBlock(spacerH, bodyW))
 	}
 	parts = append(parts, help)
 
@@ -1406,6 +1371,24 @@ func (m model) renderFrame() string {
 		Width(screenW - 2).
 		Height(screenH - 2).
 		Render(body)
+}
+
+func padBlockHeight(content string, height int, width int) string {
+	for lipgloss.Height(content) < height {
+		content += "\n" + strings.Repeat(" ", max(1, width))
+	}
+	return content
+}
+
+func blankBlock(height int, width int) string {
+	if height <= 0 {
+		return ""
+	}
+	lines := make([]string, height)
+	for i := range lines {
+		lines[i] = strings.Repeat(" ", max(1, width))
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m model) renderContent(width, height int) string {
@@ -1434,11 +1417,11 @@ func (m model) renderHelp() string {
 	if m.modal != noModal {
 		keys = "j/k or wheel move • click select • esc/outside click close modal • ctrl+q quit"
 	} else if m.mode == viewStartup {
-		keys = "space/click/wheel progress • ctrl+x cancel • ctrl+q quit"
+		keys = "ctrl+x cancel • ctrl+q quit"
 	} else if m.mode == viewConfig {
 		keys = "j/k or wheel move • click edit/toggle • right-click exclude removes • a add • d remove • esc search • ctrl+q quit"
 	} else if m.mode == viewSearch {
-		keys = "click select • double-click open • right-click delete • wheel move • ctrl+s settings • / focus • ctrl+q quit"
+		keys = "↑/↓ or mouse move • enter/double-click open • ctrl+d/delete/right-click delete • ctrl+q quit"
 	}
 	return m.theme.Muted.Render(trimMiddle("keys: "+keys, max(20, m.width-6)))
 }
@@ -1535,28 +1518,23 @@ func (m model) viewStartup(width, height int) string {
 	}
 	lines := []string{
 		m.theme.Highlight.Render(message),
-		m.theme.Muted.Render("Press Space for progress."),
 	}
-	cardHeight := 5
-	if m.showScanProgress {
-		p := m.scanProgress
-		current := "waiting for first path…"
-		if strings.TrimSpace(p.CurrentPath) != "" {
-			current = trimMiddle(p.CurrentPath, max(18, min(86, width-16)))
-		}
-		lines = append(lines,
-			"",
-			m.theme.Title.Render("PROGRESS"),
-			fmt.Sprintf("scanned: %d", p.Scanned),
-			fmt.Sprintf("indexed: %d", p.Indexed),
-			fmt.Sprintf("skipped: %d", p.Skipped),
-			fmt.Sprintf("elapsed: %s", prettyDuration(p.Elapsed)),
-			fmt.Sprintf("speed: %.1f files/s", p.FilesPerSecond),
-			m.theme.Muted.Render("current: "+current),
-			m.theme.Muted.Render("Press Space to hide progress."),
-		)
-		cardHeight = 14
+	p := m.scanProgress
+	current := "waiting for first path…"
+	if strings.TrimSpace(p.CurrentPath) != "" {
+		current = trimMiddle(p.CurrentPath, max(18, min(86, width-16)))
 	}
+	lines = append(lines,
+		"",
+		m.theme.Title.Render("PROGRESS"),
+		fmt.Sprintf("scanned: %d", p.Scanned),
+		fmt.Sprintf("indexed: %d", p.Indexed),
+		fmt.Sprintf("skipped: %d", p.Skipped),
+		fmt.Sprintf("elapsed: %s", prettyDuration(p.Elapsed)),
+		fmt.Sprintf("speed: %.1f files/s", p.FilesPerSecond),
+		m.theme.Muted.Render("current: "+current),
+	)
+	cardHeight := 13
 
 	card := m.panelStyle().
 		Width(max(32, min(78, width-4))).
@@ -1577,13 +1555,9 @@ func (m model) viewSearch(width, height int) string {
 	lines = append(lines, m.searchBoxView())
 
 	if len(m.searchRes) == 0 {
-		lines = append(lines, m.theme.Muted.Render("No results"))
+		lines = append(lines, m.renderEmptySearchResults())
 	} else {
-		tableTitle := m.theme.Title.Render("RESULTS")
-		if m.searchListFocus {
-			tableTitle = m.theme.Highlight.Render("RESULTS")
-		}
-		lines = append(lines, tableTitle)
+		lines = append(lines, m.theme.Title.Render("RESULTS"))
 		lines = append(lines, m.renderSearchResults())
 	}
 	card := lipgloss.NewStyle().
@@ -1594,6 +1568,24 @@ func (m model) viewSearch(width, height int) string {
 		Height(max(3, height-2)).
 		Render(strings.Join(lines, "\n"))
 	return card
+}
+
+func (m model) renderEmptySearchResults() string {
+	tableW := max(searchColumnsWidth(m.searchTable.Columns()), m.searchTable.Width())
+	blockH := max(3, m.searchTable.Height()+1)
+	message := lipgloss.PlaceHorizontal(tableW, lipgloss.Center, m.theme.Muted.Render("No results"))
+	topPad := max(0, (blockH-1)/2)
+	bottomPad := max(0, blockH-topPad-1)
+
+	lines := make([]string, 0, blockH)
+	for range topPad {
+		lines = append(lines, "")
+	}
+	lines = append(lines, message)
+	for range bottomPad {
+		lines = append(lines, "")
+	}
+	return strings.Join(lines, "\n")
 }
 
 func (m model) renderSearchResults() string {
@@ -2061,7 +2053,6 @@ func (m model) startScanCmd(roots []string, label string, reindex bool) (model, 
 	m.scanSession++
 	session := m.scanSession
 	m.scanProgress = scanner.Progress{}
-	m.showScanProgress = false
 	if m.scanProgressSource == nil {
 		m.scanProgressSource = newScanProgressSource()
 	}
@@ -2077,14 +2068,29 @@ func (m model) startScanCmd(roots []string, label string, reindex bool) (model, 
 
 func openCmd(path string, reveal bool) tea.Cmd {
 	return func() tea.Msg {
-		var cmd *exec.Cmd
-		if reveal {
-			cmd = exec.Command("open", "-R", path)
-		} else {
-			cmd = exec.Command("open", path)
-		}
+		cmd := openCommand(path, reveal)
 		_ = cmd.Start()
 		return nil
+	}
+}
+
+func openCommand(path string, reveal bool) *exec.Cmd {
+	switch runtime.GOOS {
+	case "windows":
+		if reveal {
+			return exec.Command("explorer.exe", "/select,"+path)
+		}
+		return exec.Command("explorer.exe", path)
+	case "darwin":
+		if reveal {
+			return exec.Command("open", "-R", path)
+		}
+		return exec.Command("open", path)
+	default:
+		if reveal {
+			return exec.Command("xdg-open", filepath.Dir(path))
+		}
+		return exec.Command("xdg-open", path)
 	}
 }
 

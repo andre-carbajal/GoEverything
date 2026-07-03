@@ -71,9 +71,10 @@ If the startup scan fails or is canceled, it opens settings so you can adjust th
 
 Useful shortcuts:
 
-- `Space` show/hide startup scan progress
-- `/` focus search input
-- `Ctrl+S` open settings
+- `↑` / `↓` move through search results
+- `Enter` open selected result
+- `Ctrl+D` / `Delete` remove selected result
+- Click select, double-click open, right-click delete
 - `Ctrl+G` scan now
 - `Ctrl+X` stop scan
 - `Ctrl+Q` quit
