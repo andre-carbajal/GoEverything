@@ -39,9 +39,6 @@ func TestLoadCreatesDefaultConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load: %v", err)
 	}
-	if !cfg.AutoScanOnStart {
-		t.Fatalf("expected auto scan on start=true")
-	}
 	if cfg.DefaultScanPath != "~" {
 		t.Fatalf("unexpected default scan path: %s", cfg.DefaultScanPath)
 	}
@@ -73,8 +70,7 @@ func TestLoadNormalizesInvalidDeleteModeToTrash(t *testing.T) {
   "default_scan_path": "~",
   "excludes": [".git"],
   "theme": "tokyonight",
-  "delete_mode": "danger",
-  "auto_scan_on_start": true
+  "delete_mode": "danger"
 }`)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)
@@ -103,8 +99,7 @@ func TestLoadOldConfigWithoutDeleteModeDefaultsToTrash(t *testing.T) {
   "db_path": "/tmp/test.db",
   "default_scan_path": "~",
   "excludes": [".git"],
-  "theme": "tokyonight",
-  "auto_scan_on_start": true
+  "theme": "tokyonight"
 }`)
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("write config: %v", err)

@@ -24,7 +24,6 @@ func TestSearchSettingsShortcutOpensConfig(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: true,
 	})
 	m.mode = viewSearch
 
@@ -43,7 +42,6 @@ func TestNewModelStartsInStartupView(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: true,
 	})
 	if m.mode != viewStartup {
 		t.Fatalf("expected initial mode startup, got %v", m.mode)
@@ -53,7 +51,7 @@ func TestNewModelStartsInStartupView(t *testing.T) {
 	}
 }
 
-func TestSlashFocusesSearch(t *testing.T) {
+func TestSlashFromConfigFocusesSearch(t *testing.T) {
 	t.Parallel()
 
 	m := newModel(context.Background(), config.Config{
@@ -61,9 +59,8 @@ func TestSlashFocusesSearch(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: true,
 	})
-	m.mode = viewMenu
+	m.mode = viewConfig
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}})
 	next := updated.(model)
@@ -80,7 +77,6 @@ func TestSearchInputAllowsTypingJKWhenInputFocused(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: true,
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{{Name: "a", Path: "/tmp/a"}}
@@ -100,7 +96,6 @@ func TestSearchInputAllowsTypingTestWithoutOpeningSettings(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: true,
 	})
 	m.mode = viewSearch
 
@@ -125,7 +120,6 @@ func TestSearchInputAllowsTypingDWhenInputFocused(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: true,
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{{Name: "delete-me.txt", Path: "/tmp/delete-me.txt"}}
@@ -148,7 +142,6 @@ func TestSearchListFocusUsesJKForNavigation(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: true,
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{
@@ -177,7 +170,6 @@ func TestSearchResultSelectionRendersFullRowWidth(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: true,
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{
@@ -208,7 +200,6 @@ func TestSearchListDOpensDeleteConfirmationAndCancelKeepsResults(t *testing.T) {
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
 		DeleteMode:      config.DeleteModeTrash,
-		AutoScanOnStart: true,
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{{Name: "delete-me.txt", Path: "/tmp/delete-me.txt"}}
@@ -246,7 +237,6 @@ func TestDeleteConfirmationEnterStartsDeleteCommand(t *testing.T) {
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
 		DeleteMode:      config.DeleteModePermanent,
-		AutoScanOnStart: true,
 	})
 	m.mode = viewSearch
 	m.modal = deleteConfirmModal
@@ -273,7 +263,6 @@ func TestDeleteResultSuccessRemovesResultAndClampsCursor(t *testing.T) {
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
 		DeleteMode:      config.DeleteModePermanent,
-		AutoScanOnStart: true,
 	})
 	m.mode = viewSearch
 	deleted := db.Entry{Name: "folder", Path: "/tmp/folder", IsDir: true}
@@ -307,7 +296,6 @@ func TestCountDoneAlwaysStartsInitialScanFromDefaultPath(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 
 	updated, cmd := m.Update(countDoneMsg{total: 7})
@@ -335,7 +323,6 @@ func TestStartupViewIsMinimalByDefault(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewStartup
 	m.busy = true
@@ -360,7 +347,6 @@ func TestStartupSpaceTogglesProgressDetails(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewStartup
 	m.busy = true
@@ -406,7 +392,6 @@ func TestStartupCtrlXCancelsAndOnlyCtrlQQuits(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewStartup
 	m.busy = true
@@ -445,7 +430,6 @@ func TestScanProgressTickUpdatesStartupProgress(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewStartup
 	m.busy = true
@@ -481,7 +465,6 @@ func TestInitialScanSuccessOpensSearch(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewStartup
 	m.busy = true
@@ -511,7 +494,6 @@ func TestInitialScanFailureOpensConfig(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewStartup
 	m.busy = true
@@ -538,7 +520,6 @@ func TestManualScanSuccessReturnsToSearch(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewStartup
 	m.busy = true
@@ -566,7 +547,6 @@ func TestCtrlGSwitchesToScanModal(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewSearch
 
@@ -599,7 +579,6 @@ func TestEscFromConfigReturnsToSearch(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewConfig
 
@@ -648,7 +627,6 @@ func modelWithManySearchRows() model {
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
 		DeleteMode:      config.DeleteModeTrash,
-		AutoScanOnStart: false,
 	})
 	m.mode = viewSearch
 	m.searchRes = make([]db.Entry, 24)
@@ -672,25 +650,13 @@ func TestMouseHoverTracksInteractiveTargetsWithoutActivating(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git", "node_modules"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	}
 
 	m := newModel(context.Background(), cfg)
-	m.mode = viewMenu
-	updated, _ := m.Update(mouseEventIn(m.menuCardHitbox(2), tea.MouseActionMotion, tea.MouseButtonNone))
-	next := updated.(model)
-	if next.hoveredMouse.kind != mouseTargetMenuCard || next.hoveredMouse.index != 2 {
-		t.Fatalf("expected menu card hover, got %#v", next.hoveredMouse)
-	}
-	if next.mode != viewMenu || next.menuCursor != 0 {
-		t.Fatalf("hover should not activate menu, mode=%v cursor=%d", next.mode, next.menuCursor)
-	}
-
-	m = newModel(context.Background(), cfg)
 	m.mode = viewConfig
 	m.cfgCursor = 0
-	updated, _ = m.Update(mouseEventIn(m.configRowHitbox(1), tea.MouseActionMotion, tea.MouseButtonNone))
-	next = updated.(model)
+	updated, _ := m.Update(mouseEventIn(m.configRowHitbox(1), tea.MouseActionMotion, tea.MouseButtonNone))
+	next := updated.(model)
 	if next.hoveredMouse.kind != mouseTargetConfigRow || next.hoveredMouse.index != 1 {
 		t.Fatalf("expected config row hover, got %#v", next.hoveredMouse)
 	}
@@ -770,7 +736,7 @@ func TestSearchResultMouseActionsUseRenderedRowCoordinates(t *testing.T) {
 	}
 }
 
-func TestMouseLeftClickActivatesMenuAndConfigRows(t *testing.T) {
+func TestMouseLeftClickActivatesConfigRows(t *testing.T) {
 	t.Parallel()
 
 	m := newModel(context.Background(), config.Config{
@@ -778,19 +744,10 @@ func TestMouseLeftClickActivatesMenuAndConfigRows(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
-	m.mode = viewMenu
-	updated, _ := m.Update(mouseEventIn(m.menuCardHitbox(2), tea.MouseActionPress, tea.MouseButtonLeft))
-	next := updated.(model)
-	if next.mode != viewConfig || next.menuCursor != 2 {
-		t.Fatalf("expected menu config click to open config, mode=%v cursor=%d", next.mode, next.menuCursor)
-	}
-
-	m = newModel(context.Background(), m.cfg)
 	m.mode = viewConfig
-	updated, _ = m.Update(mouseEventIn(m.configRowHitbox(1), tea.MouseActionPress, tea.MouseButtonLeft))
-	next = updated.(model)
+	updated, _ := m.Update(mouseEventIn(m.configRowHitbox(1), tea.MouseActionPress, tea.MouseButtonLeft))
+	next := updated.(model)
 	if next.modal != themeModal || next.cfgCursor != 1 {
 		t.Fatalf("expected theme row click to open theme modal, modal=%v cursor=%d", next.modal, next.cfgCursor)
 	}
@@ -804,7 +761,6 @@ func TestSearchSettingsMouseClickOpensConfig(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewSearch
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -833,7 +789,6 @@ func TestSearchResultMouseClickDoubleClickAndRightClick(t *testing.T) {
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
 		DeleteMode:      config.DeleteModeTrash,
-		AutoScanOnStart: false,
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{
@@ -872,7 +827,6 @@ func TestMouseWheelMovesSearchConfigAndModalCursors(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git", "node_modules"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{
@@ -915,7 +869,6 @@ func TestConfigViewRendersOnNarrowTerminal(t *testing.T) {
 		DefaultScanPath: "~/Projects/Very/Long/Path/For/Testing/Responsiveness",
 		Excludes:        []string{".git", "Library/Caches/*"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewConfig
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 72, Height: 30})
@@ -941,7 +894,6 @@ func TestExcludeInputModalDoesNotOverflow(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.modal = excludeInputModal
 	m.cfgInputActive = true
@@ -974,7 +926,6 @@ func TestConfigViewShowsAndTogglesDeleteMode(t *testing.T) {
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
 		DeleteMode:      config.DeleteModeTrash,
-		AutoScanOnStart: false,
 	})
 	m.mode = viewConfig
 
@@ -999,7 +950,6 @@ func TestTopBarHidesIdleStatusWhenNotBusy(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewSearch
 	m.busy = false
@@ -1024,7 +974,6 @@ func TestWindowSizeMsgStoresWidthAndHeight(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
@@ -1042,7 +991,6 @@ func TestSearchViewRendersTableResults(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewSearch
 	m.searchInput.SetValue("report")
@@ -1076,7 +1024,6 @@ func TestSearchCtrlPNoLongerTogglesPathFilter(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewSearch
 
@@ -1099,7 +1046,6 @@ func TestOnlyCtrlQQuitsFromSearch(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewSearch
 
@@ -1129,7 +1075,6 @@ func TestErrorRendersWithoutStatusFooter(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewSearch
 	m.err = errors.New("boom")
@@ -1151,7 +1096,6 @@ func TestConfigModalReplacesCentralContent(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	m.mode = viewConfig
 	m.modal = themeModal
@@ -1173,7 +1117,6 @@ func TestFullScreenFrameRendersBorder(t *testing.T) {
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
 		Theme:           "tokyonight",
-		AutoScanOnStart: false,
 	})
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 72, Height: 24})
 	next := updated.(model)
@@ -1182,26 +1125,6 @@ func TestFullScreenFrameRendersBorder(t *testing.T) {
 	if !strings.Contains(out, "╭") || !strings.Contains(out, "╯") {
 		t.Fatalf("expected full-screen frame border, got:\n%s", out)
 	}
-	if strings.Contains(out, "████████") {
-		t.Fatalf("expected compact header on narrow terminal, got full ascii header")
-	}
-}
-
-func TestMenuHeaderFallsBackToCompactWhenTerminalIsNarrow(t *testing.T) {
-	t.Parallel()
-
-	m := newModel(context.Background(), config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
-		AutoScanOnStart: false,
-	})
-	m.mode = viewMenu
-	updated, _ := m.Update(tea.WindowSizeMsg{Width: 60, Height: 24})
-	next := updated.(model)
-
-	out := next.View()
 	if strings.Contains(out, "████████") {
 		t.Fatalf("expected compact header on narrow terminal, got full ascii header")
 	}

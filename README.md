@@ -2,13 +2,15 @@
 
 Fast local file indexing and search for macOS and Windows (Everything-style), built with Go.
 
-> **Platform status:** GoEverything supports macOS and Windows. Windows scans use an NTFS metadata backend when available and automatically fall back to a portable filesystem walk.
+> **Platform status:** GoEverything supports macOS and Windows. Windows scans use an NTFS metadata backend when
+> available and automatically fall back to a portable filesystem walk.
 
 ## What is GoEverything?
 
 GoEverything (`ge`) helps you quickly find files and folders using a local SQLite + FTS5 index.
 
 Use it when you want to:
+
 - Find files by name or partial text
 - Filter by extension or root path
 - Keep results updated with a watcher
@@ -21,16 +23,19 @@ Use it when you want to:
 ### Option 1: Install from release script (recommended)
 
 **macOS**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/andre-carbajal/GoEverything/main/scripts/install.sh | bash
 ```
 
 **Windows (PowerShell)**
+
 ```powershell
 iwr https://raw.githubusercontent.com/andre-carbajal/GoEverything/main/scripts/install.ps1 -UseB | iex
 ```
 
 You can also install a specific version:
+
 - macOS: `bash -s -- v0.1.0`
 - Windows: `.\install.ps1 -Version v0.1.0`
 
@@ -45,6 +50,7 @@ ge --help
 ### Option 3: Package manager (official)
 
 **Homebrew**
+
 ```bash
 brew tap andre-carbajal/tap
 brew install goeverything
@@ -64,6 +70,7 @@ The TUI scans your configured location first, then opens the search screen.
 If the startup scan fails or is canceled, it opens settings so you can adjust the scan location or excludes.
 
 Useful shortcuts:
+
 - `Space` show/hide startup scan progress
 - `/` focus search input
 - `Ctrl+S` open settings
@@ -156,6 +163,7 @@ ge reindex
 ## Configuration
 
 Default paths:
+
 - macOS/Linux config: `~/.config/ge/config.json`
 - macOS/Linux database: `~/.config/ge/goeverything.db`
 - Windows config: `%LOCALAPPDATA%\ge\config.json`
@@ -165,16 +173,23 @@ Example `~/.config/ge/config.json`:
 
 ```json
 {
+  "db_path": "~/.config/ge/goeverything.db",
   "default_scan_path": "~",
-  "auto_scan_on_start": true,
   "theme": "tokyonight",
-  "excludes": [".git", "node_modules", "Library/Caches/*"]
+  "delete_mode": "trash",
+  "excludes": [
+    ".git",
+    "node_modules",
+    "Library/Caches/*"
+  ]
 }
 ```
 
 Notes:
+
+- `db_path`: SQLite database location
 - `default_scan_path`: default root when you do not pass `--root`
-- `auto_scan_on_start`: legacy field; the TUI now always runs its startup scan before opening search
+- `delete_mode`: `trash` or `permanent` for deletes from the TUI
 - `excludes`: ignore names or root-relative glob patterns
 
 ---
@@ -182,16 +197,20 @@ Notes:
 ## Troubleshooting
 
 ### No results after scan
+
 - Re-run scan on expected root: `ge scan --root "$HOME"`
 - Search with broader query: `ge search -q a --limit 200`
 - Confirm DB path if using custom `--db`
 
 ### Permission issues
+
 - Some directories require extra platform permissions.
 - Start with folders you own (`$HOME`) and expand gradually.
-- On Windows, the NTFS backend may require an elevated terminal for full-volume scans. In `--backend auto` mode, GoEverything falls back to the portable walker if NTFS metadata access is unavailable.
+- On Windows, the NTFS backend may require an elevated terminal for full-volume scans. In `--backend auto` mode,
+  GoEverything falls back to the portable walker if NTFS metadata access is unavailable.
 
 ### Scan feels slow
+
 - Tune workers and batch size:
 
 ```bash
@@ -199,13 +218,15 @@ ge scan --root "$HOME" --workers 16 --batch 3000
 ```
 
 - Add excludes for heavy folders (`node_modules`, caches, build outputs).
-- On Windows, use `--backend ntfs` to require NTFS metadata scanning, `--backend walk` to force the portable scanner, or the default `--backend auto` to try NTFS first and fall back automatically.
+- On Windows, use `--backend ntfs` to require NTFS metadata scanning, `--backend walk` to force the portable scanner, or
+  the default `--backend auto` to try NTFS first and fall back automatically.
 
 ---
 
 ## Advanced options (short)
 
 ### Scan tuning
+
 - `--workers`: concurrent index workers
 - `--batch`: DB upsert batch size (default: 2000)
 - `--exclude`: skip names or root-relative globs

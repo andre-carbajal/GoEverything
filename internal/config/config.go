@@ -26,7 +26,6 @@ type Config struct {
 	Excludes        []string `json:"excludes"`
 	Theme           string   `json:"theme"`
 	DeleteMode      string   `json:"delete_mode"`
-	AutoScanOnStart bool     `json:"auto_scan_on_start"`
 }
 
 type legacyConfig struct {
@@ -35,7 +34,6 @@ type legacyConfig struct {
 	Excludes        []string `json:"excludes"`
 	Theme           string   `json:"theme"`
 	DefaultScanMode string   `json:"default_scan_mode"`
-	AutoScanOnStart bool     `json:"auto_scan_on_start"`
 }
 
 func Load() (Config, error) {
@@ -128,7 +126,6 @@ func defaults() Config {
 		Excludes:        scanner.DefaultExcludes(),
 		Theme:           defaultTheme,
 		DeleteMode:      DeleteModeTrash,
-		AutoScanOnStart: true,
 	}
 }
 
@@ -146,7 +143,6 @@ func fromLegacy(old legacyConfig) Config {
 		Excludes:        old.Excludes,
 		Theme:           old.Theme,
 		DeleteMode:      DeleteModeTrash,
-		AutoScanOnStart: old.AutoScanOnStart,
 		DefaultScanPath: homeToken,
 	}
 	if len(old.Roots) > 0 {

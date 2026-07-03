@@ -27,7 +27,6 @@ type viewMode int
 
 const (
 	viewStartup viewMode = iota
-	viewMenu
 	viewSearch
 	viewConfig
 )
@@ -93,7 +92,6 @@ const (
 	mouseTargetNone mouseTargetKind = iota
 	mouseTargetSettings
 	mouseTargetStartupProgress
-	mouseTargetMenuCard
 	mouseTargetSearchInput
 	mouseTargetSearchResult
 	mouseTargetConfigRow
@@ -161,10 +159,8 @@ type model struct {
 	width  int
 	height int
 
-	mode       viewMode
-	modal      modalMode
-	menu       []string
-	menuCursor int
+	mode  viewMode
+	modal modalMode
 
 	searchInput textinput.Model
 	searchTable table.Model
@@ -236,7 +232,6 @@ func newModel(ctx context.Context, cfg config.Config) model {
 		height:      36,
 		mode:        viewStartup,
 		modal:       noModal,
-		menu:        []string{"Search", "Scan/Re-index", "Config"},
 		searchInput: searchInput,
 		cfgInput:    cfgInput,
 		theme:       themeByName(cfg.Theme),
@@ -306,9 +301,6 @@ func (m model) bodySize() (int, int) {
 func (m model) contentHeight() int {
 	_, bodyH := m.bodySize()
 	headerH := lipgloss.Height(m.renderTopBar())
-	if m.mode == viewMenu {
-		headerH += lipgloss.Height(m.renderLogo()) + 1
-	}
 	footerH := lipgloss.Height(m.renderError()) + lipgloss.Height(m.renderHelp()) + 1
 	return max(3, bodyH-headerH-footerH-2)
 }
@@ -369,22 +361,8 @@ func (h hitbox) contains(x, y int) bool {
 	return x >= h.x && x < h.x+h.w && y >= h.y && y < h.y+h.h
 }
 
-func (m model) settingsButtonClicked(msg tea.MouseMsg) bool {
-	if m.mode != viewSearch {
-		return false
-	}
-	ev := tea.MouseEvent(msg)
-	if ev.Button != tea.MouseButtonLeft || ev.Action != tea.MouseActionPress {
-		return false
-	}
-	return m.settingsButtonHitbox().contains(ev.X, ev.Y)
-}
-
 func (m model) contentStartY() int {
 	y := 1
-	if m.mode == viewMenu {
-		y += lipgloss.Height(m.renderLogo())
-	}
 	y += lipgloss.Height(m.renderTopBar())
 	return y
 }
@@ -409,23 +387,8 @@ func (m model) startupProgressHitbox() hitbox {
 	}
 }
 
-func (m model) menuCardHitbox(index int) hitbox {
-	bodyW, _ := m.bodySize()
-	cardW := max(28, min(54, bodyW-10))
-	return hitbox{
-		x: m.contentStartX() + 3,
-		y: m.contentStartY() + 4 + index*5,
-		w: cardW + 4,
-		h: 3,
-	}
-}
-
 func (m model) searchInputHitbox() hitbox {
 	return m.searchMouseLayout().searchInput
-}
-
-func (m model) searchResultsStartY() int {
-	return m.searchMouseLayout().firstResultY
 }
 
 func (m model) searchVisibleWindow() (cursor int, start int, end int) {
@@ -657,12 +620,6 @@ func (m model) resolveMouseTarget(x, y int) mouseTarget {
 		if m.startupProgressHitbox().contains(x, y) {
 			return mouseTarget{kind: mouseTargetStartupProgress}
 		}
-	case viewMenu:
-		for i := range m.menu {
-			if m.menuCardHitbox(i).contains(x, y) {
-				return mouseTarget{kind: mouseTargetMenuCard, index: i}
-			}
-		}
 	case viewSearch:
 		if m.settingsButtonHitbox().contains(x, y) {
 			return mouseTarget{kind: mouseTargetSettings}
@@ -727,32 +684,6 @@ func (m model) focusSearchInput() model {
 	m.searchInput.Focus()
 	m.searchTable.Blur()
 	return m
-}
-
-// noinspection GoAssignmentToReceiver
-func (m model) activateMenuSelection() (model, tea.Cmd) {
-	switch m.menu[m.menuCursor] {
-	case "Search":
-		m.mode = viewSearch
-		m = m.focusSearchInput()
-		return m, nil
-	case "Scan/Re-index":
-		if m.busy {
-			return m, nil
-		}
-		roots, err := defaultScanRoots(m.cfg)
-		if err != nil {
-			m.err = err
-			m.status = "re-index failed"
-			return m, nil
-		}
-		m.status = "re-indexing…"
-		return m.startScanCmd(roots, "reindex", true)
-	case "Config":
-		m.mode = viewConfig
-		return m, nil
-	}
-	return m, nil
 }
 
 func (m model) activateConfigRow(index int) (model, tea.Cmd) {
@@ -906,10 +837,6 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			m = m.scrollSearchResults(delta)
 		case viewConfig:
 			m = m.scrollConfig(delta)
-		case viewMenu:
-			if len(m.menu) > 0 {
-				m.menuCursor = min(max(0, m.menuCursor+delta), len(m.menu)-1)
-			}
 		}
 		return m, nil
 	}
@@ -946,11 +873,6 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		m = m.openSettingsView()
 	case mouseTargetStartupProgress:
 		m.showScanProgress = !m.showScanProgress
-	case mouseTargetMenuCard:
-		if target.index >= 0 && target.index < len(m.menu) {
-			m.menuCursor = target.index
-			return m.activateMenuSelection()
-		}
 	case mouseTargetSearchInput:
 		m = m.focusSearchInput()
 	case mouseTargetSearchResult:
@@ -1150,10 +1072,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m = m.focusSearchView()
 				return m, nil
 			}
-			if m.mode == viewMenu {
-				m = m.focusSearchView()
-				return m, nil
-			}
 		case "/":
 			if m.mode == viewStartup {
 				return m, nil
@@ -1168,8 +1086,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch m.mode {
-		case viewMenu:
-			return m.updateMenu(msg)
 		case viewSearch:
 			return m.updateSearch(msg)
 		case viewConfig:
@@ -1179,18 +1095,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 	}
 
-	return m, nil
-}
-
-func (m model) updateMenu(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	switch msg.String() {
-	case "j", "down":
-		m.menuCursor = (m.menuCursor + 1) % len(m.menu)
-	case "k", "up":
-		m.menuCursor = (m.menuCursor - 1 + len(m.menu)) % len(m.menu)
-	case "enter":
-		return m.activateMenuSelection()
-	}
 	return m, nil
 }
 
@@ -1477,10 +1381,7 @@ func (m model) renderFrame() string {
 			Render(body)
 	}
 
-	parts := make([]string, 0, 5)
-	if m.mode == viewMenu {
-		parts = append(parts, m.renderLogo())
-	}
+	parts := make([]string, 0, 4)
 	parts = append(parts, m.renderTopBar())
 
 	help := m.renderHelp()
@@ -1512,8 +1413,6 @@ func (m model) renderContent(width, height int) string {
 	switch m.mode {
 	case viewStartup:
 		content = m.viewStartup(width, height)
-	case viewMenu:
-		content = m.viewMenu(width)
 	case viewSearch:
 		content = m.viewSearch(width, height)
 	case viewConfig:
@@ -1542,39 +1441,6 @@ func (m model) renderHelp() string {
 		keys = "click select • double-click open • right-click delete • wheel move • ctrl+s settings • / focus • ctrl+q quit"
 	}
 	return m.theme.Muted.Render(trimMiddle("keys: "+keys, max(20, m.width-6)))
-}
-
-func (m model) renderLogo() string {
-	ascii := []string{
-		"   █████████           ██████████                                            █████    █████       ███                     ",
-		"  ███░░░░░███         ░░███░░░░░█                                           ░░███    ░░███       ░░░                      ",
-		" ███     ░░░   ██████  ░███  █ ░  █████ █████  ██████  ████████  █████ ████ ███████   ░███████   ████  ████████    ███████",
-		"░███          ███░░███ ░██████   ░░███ ░░███  ███░░███░░███░░███░░███ ░███ ░░░███░    ░███░░███ ░░███ ░░███░░███  ███░░███",
-		"░███    █████░███ ░███ ░███░░█    ░███  ░███ ░███████  ░███ ░░░  ░███ ░███   ░███     ░███ ░███  ░███  ░███ ░███ ░███ ░███",
-		"░░███  ░░███ ░███ ░███ ░███ ░   █ ░░███ ███  ░███░░░   ░███      ░███ ░███   ░███ ███ ░███ ░███  ░███  ░███ ░███ ░███ ░███",
-		" ░░█████████ ░░██████  ██████████  ░░█████   ░░██████  █████     ░░███████   ░░█████  ████ █████ █████ ████ █████░░███████",
-		"  ░░░░░░░░░   ░░░░░░  ░░░░░░░░░░    ░░░░░     ░░░░░░  ░░░░░       ░░░░░███    ░░░░░  ░░░░ ░░░░░ ░░░░░ ░░░░ ░░░░░  ░░░░░███",
-		"                                                                  ███ ░███                                        ███ ░███",
-		"                                                                 ░░██████                                        ░░██████ ",
-		"                                                                  ░░░░░░                                          ░░░░░░  ",
-	}
-	asciiBlock := strings.Join(ascii, "\n")
-	asciiWidth := lipgloss.Width(asciiBlock)
-	available, _ := m.bodySize()
-
-	logo := m.theme.Header.Render(asciiBlock)
-	if asciiWidth > available {
-		compactLabel := "GOEVERYTHING"
-		if available < 34 {
-			compactLabel = "GE"
-		}
-		logo = lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(m.theme.Border).
-			Padding(0, 1).
-			Render(m.theme.Header.Render(compactLabel))
-	}
-	return logo
 }
 
 func (m model) renderTopBar() string {
@@ -1635,10 +1501,6 @@ func (m model) panelStyle() lipgloss.Style {
 		Padding(0, 1)
 }
 
-func (m model) itemStyle(active bool) lipgloss.Style {
-	return m.itemStyleState(active, false)
-}
-
 func (m model) itemStyleState(active bool, hovered bool) lipgloss.Style {
 	st := m.panelStyle()
 	if active {
@@ -1658,40 +1520,6 @@ func (m model) badgeStyle() lipgloss.Style {
 
 func (m model) inputFocusStyle() lipgloss.Style {
 	return lipgloss.NewStyle().Background(m.theme.InputBG).Foreground(m.theme.InputFG)
-}
-
-func (m model) viewMenu(width int) string {
-	type menuCard struct {
-		Title  string
-		Desc   string
-		Hotkey string
-	}
-	cards := []menuCard{
-		{Title: "Search", Desc: "Find files and folders across your index", Hotkey: "/"},
-		{Title: "Scan / Re-index", Desc: "Rebuild the file index from scratch", Hotkey: "Ctrl+G"},
-		{Title: "Config", Desc: "Paths, themes and scan preferences", Hotkey: "C"},
-	}
-
-	renderCard := func(card menuCard, active bool, hovered bool) string {
-		base := m.itemStyleState(active, hovered).Width(max(28, min(54, width-6)))
-
-		title := m.theme.Text.Bold(true).Render(card.Title)
-		desc := m.theme.Muted.Render(card.Desc)
-		hotkey := m.badgeStyle().Render(card.Hotkey)
-		body := lipgloss.JoinHorizontal(
-			lipgloss.Top,
-			lipgloss.JoinVertical(lipgloss.Left, title, desc),
-			lipgloss.NewStyle().Width(4).Render(""),
-			hotkey,
-		)
-		return base.Render(body)
-	}
-
-	lines := []string{m.theme.Title.Render("MAIN MENU")}
-	for i, card := range cards {
-		lines = append(lines, renderCard(card, i == m.menuCursor, m.mouseHoverMatches(mouseTargetMenuCard, i)))
-	}
-	return m.panelStyle().Width(max(32, min(60, width-4))).Render(strings.Join(lines, "\n\n"))
 }
 
 func (m model) viewStartup(width, height int) string {
@@ -2258,10 +2086,6 @@ func openCmd(path string, reveal bool) tea.Cmd {
 		_ = cmd.Start()
 		return nil
 	}
-}
-
-func (m model) searchScopeLabel() string {
-	return m.cfg.DefaultScanPath
 }
 
 func defaultScanRoots(cfg config.Config) ([]string, error) {
