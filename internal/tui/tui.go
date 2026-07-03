@@ -155,9 +155,10 @@ func (s *scanProgressSource) snapshot(session int) (scanner.Progress, bool) {
 type model struct {
 	ctx context.Context
 
-	cfg    config.Config
-	width  int
-	height int
+	cfg        config.Config
+	saveConfig func(config.Config) error
+	width      int
+	height     int
 
 	mode  viewMode
 	modal modalMode
@@ -226,6 +227,7 @@ func newModel(ctx context.Context, cfg config.Config) model {
 	m := model{
 		ctx:         ctx,
 		cfg:         cfg,
+		saveConfig:  config.Save,
 		width:       120,
 		height:      36,
 		mode:        viewStartup,
@@ -402,6 +404,42 @@ func (m model) searchResultHitbox(index int) hitbox {
 	}
 }
 
+type configLayout struct {
+	outerWidth  int
+	wide        bool
+	gap         int
+	leftW       int
+	rightW      int
+	leftInnerW  int
+	rightInnerW int
+}
+
+func configLayoutForWidth(width int) configLayout {
+	outerWidth := max(44, width-2)
+	gap := 2
+	leftW := outerWidth
+	rightW := 0
+	wide := outerWidth >= 96
+	if wide {
+		leftW = max(30, int(float64(outerWidth)*0.56))
+		rightW = outerWidth - leftW - gap
+		if rightW < 24 {
+			wide = false
+			leftW = outerWidth
+			rightW = 0
+		}
+	}
+	return configLayout{
+		outerWidth:  outerWidth,
+		wide:        wide,
+		gap:         gap,
+		leftW:       leftW,
+		rightW:      rightW,
+		leftInnerW:  max(24, leftW-4),
+		rightInnerW: max(22, rightW-4),
+	}
+}
+
 func (m model) searchTopRow(width int) (string, int) {
 	chip := func(s string, active bool) string {
 		st := lipgloss.NewStyle().
@@ -482,36 +520,25 @@ func (m model) searchMouseLayout() searchMouseLayout {
 
 func (m model) configRowHitbox(index int) hitbox {
 	bodyW, _ := m.bodySize()
-	outerWidth := min(120, max(44, bodyW-2))
-	wide := outerWidth >= 96
-	leftW := outerWidth
-	if wide {
-		leftW = max(30, int(float64(outerWidth)*0.56))
-	}
+	layout := configLayoutForWidth(bodyW)
 	return hitbox{
 		x: m.contentStartX() + 1,
 		y: m.contentStartY() + 3 + index*5,
-		w: max(28, leftW-4),
+		w: max(28, layout.leftW-4),
 		h: 3,
 	}
 }
 
 func (m model) configExcludeHitbox(index int) hitbox {
 	bodyW, _ := m.bodySize()
-	outerWidth := min(120, max(44, bodyW-2))
-	wide := outerWidth >= 96
-	gap := 2
+	layout := configLayoutForWidth(bodyW)
 	x := m.contentStartX() + 1
 	y := m.contentStartY() + 20 + index
-	w := max(24, outerWidth-4)
-	if wide {
-		leftW := max(30, int(float64(outerWidth)*0.56))
-		rightW := outerWidth - leftW - gap
-		if rightW >= 24 {
-			x = m.contentStartX() + leftW + gap + 1
-			y = m.contentStartY() + 3 + index
-			w = max(22, rightW-4)
-		}
+	w := max(24, layout.outerWidth-4)
+	if layout.wide {
+		x = m.contentStartX() + layout.leftW + layout.gap + 1
+		y = m.contentStartY() + 3 + index
+		w = max(22, layout.rightW-4)
 	}
 	return hitbox{x: x, y: y, w: w, h: 1}
 }
@@ -685,7 +712,7 @@ func (m model) activateConfigRow(index int) (model, tea.Cmd) {
 		m.cfgThemeCursor = idx
 	case 2:
 		m.cfg.DeleteMode = nextDeleteMode(m.cfg.DeleteMode)
-		if err := config.Save(m.cfg); err != nil {
+		if err := m.saveConfig(m.cfg); err != nil {
 			m.err = err
 		} else {
 			m.status = "delete mode updated"
@@ -703,7 +730,7 @@ func (m model) removeExcludeAt(index int) model {
 	if len(m.cfg.Excludes) == 0 {
 		m.cfg.Excludes = scanner.DefaultExcludes()
 	}
-	if err := config.Save(m.cfg); err != nil {
+	if err := m.saveConfig(m.cfg); err != nil {
 		m.err = err
 	} else {
 		m.status = "exclude removed"
@@ -742,7 +769,7 @@ func (m model) handleThemeOptionClick(index int) (model, tea.Cmd) {
 	m.cfg.Theme = m.themes[index]
 	m.theme = themeByName(m.cfg.Theme)
 	m = m.resizeComponents()
-	if err := config.Save(m.cfg); err != nil {
+	if err := m.saveConfig(m.cfg); err != nil {
 		m.err = err
 	} else {
 		m.status = "theme updated"
@@ -1215,7 +1242,7 @@ func (m model) handleThemeModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.cfg.Theme = m.themes[m.cfgThemeCursor]
 		m.theme = themeByName(m.cfg.Theme)
 		m = m.resizeComponents()
-		if err := config.Save(m.cfg); err != nil {
+		if err := m.saveConfig(m.cfg); err != nil {
 			m.err = err
 		} else {
 			m.status = "theme updated"
@@ -1234,7 +1261,7 @@ func (m model) handleExcludeInputModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if value != "" && !slices.Contains(m.cfg.Excludes, value) {
 			m.cfg.Excludes = append(m.cfg.Excludes, value)
 			slices.Sort(m.cfg.Excludes)
-			if err := config.Save(m.cfg); err != nil {
+			if err := m.saveConfig(m.cfg); err != nil {
 				m.err = err
 			} else {
 				m.status = "exclude added"
@@ -1281,7 +1308,7 @@ func (m model) saveScanPath(value string) (model, error) {
 		return m, fmt.Errorf("%s is not a directory", root)
 	}
 	m.cfg.DefaultScanPath = value
-	if err := config.Save(m.cfg); err != nil {
+	if err := m.saveConfig(m.cfg); err != nil {
 		return m, err
 	}
 	m.status = "saved scan location"
@@ -1430,7 +1457,7 @@ func (m model) renderHelp() string {
 
 func (m model) renderTopBar() string {
 	bodyW, _ := m.bodySize()
-	innerWidth := max(24, min(bodyW, 120))
+	innerWidth := max(24, bodyW)
 
 	scopeLen := max(8, innerWidth/4)
 	basePlain := fmt.Sprintf("◌ GoEverything %d indexed scope %s", m.totalIndexed, trimMiddle(m.cfg.DefaultScanPath, scopeLen))
@@ -1833,22 +1860,7 @@ func trimMiddle(s string, maxLen int) string {
 }
 
 func (m model) viewConfig(width, height int) string {
-	outerWidth := min(120, max(44, width-2))
-	wide := outerWidth >= 96
-	gap := 2
-	leftW := outerWidth
-	rightW := 0
-	if wide {
-		leftW = int(float64(outerWidth) * 0.56)
-		leftW = max(30, leftW)
-		rightW = outerWidth - leftW - gap
-		if rightW < 24 {
-			wide = false
-			leftW = outerWidth
-		}
-	}
-	leftInnerW := max(24, leftW-4)
-	rightInnerW := max(22, rightW-4)
+	layout := configLayoutForWidth(width)
 
 	configRow := func(idx int, title, value, action string, width int) string {
 		val := trimMiddle(value, max(12, width-4))
@@ -1861,9 +1873,9 @@ func (m model) viewConfig(width, height int) string {
 
 	leftRows := []string{
 		m.theme.Title.Render("SETTINGS"),
-		configRow(0, "scan location", m.cfg.DefaultScanPath, "↵ change", leftInnerW),
-		configRow(1, "theme", m.cfg.Theme, "↵ select", leftInnerW),
-		configRow(2, "delete mode", deleteModeLabel(m.cfg.DeleteMode), "↵ toggle", leftInnerW),
+		configRow(0, "scan location", m.cfg.DefaultScanPath, "↵ change", layout.leftInnerW),
+		configRow(1, "theme", m.cfg.Theme, "↵ select", layout.leftInnerW),
+		configRow(2, "delete mode", deleteModeLabel(m.cfg.DeleteMode), "↵ toggle", layout.leftInnerW),
 	}
 	leftPanel := strings.Join(leftRows, "\n\n")
 
@@ -1871,7 +1883,7 @@ func (m model) viewConfig(width, height int) string {
 	var exLines []string
 	for i, ex := range m.cfg.Excludes {
 		idx := i + 3
-		row := "◌ " + trimMiddle(ex, max(12, rightInnerW-6))
+		row := "◌ " + trimMiddle(ex, max(12, layout.rightInnerW-6))
 		st := m.theme.Text
 		if m.cfgCursor == idx {
 			st = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SelectBG).Bold(true)
@@ -1880,22 +1892,22 @@ func (m model) viewConfig(width, height int) string {
 		}
 		exLines = append(exLines, st.Render(row))
 	}
-	rightRows = append(rightRows, m.panelStyle().Width(rightInnerW).Render(strings.Join(exLines, "\n")))
+	rightRows = append(rightRows, m.panelStyle().Width(layout.rightInnerW).Render(strings.Join(exLines, "\n")))
 	rightRows = append(rightRows, m.theme.Muted.Render("A add pattern • D remove selected"))
 	rightPanel := strings.Join(rightRows, "\n")
 
-	if !wide {
-		stacked := m.panelStyle().Width(outerWidth).Height(max(3, height-2)).Render(leftPanel + "\n\n" + rightPanel)
+	if !layout.wide {
+		stacked := m.panelStyle().Width(layout.outerWidth).Height(max(3, height-2)).Render(leftPanel + "\n\n" + rightPanel)
 		return stacked
 	}
 
-	layout := lipgloss.JoinHorizontal(
+	columns := lipgloss.JoinHorizontal(
 		lipgloss.Top,
-		lipgloss.NewStyle().Width(leftW).Render(leftPanel),
-		lipgloss.NewStyle().Width(gap).Render(""),
-		lipgloss.NewStyle().Width(rightW).Render(rightPanel),
+		lipgloss.NewStyle().Width(layout.leftW).Render(leftPanel),
+		lipgloss.NewStyle().Width(layout.gap).Render(""),
+		lipgloss.NewStyle().Width(layout.rightW).Render(rightPanel),
 	)
-	return m.panelStyle().Width(outerWidth).Height(max(3, height-2)).Render(layout)
+	return m.panelStyle().Width(layout.outerWidth).Height(max(3, height-2)).Render(columns)
 }
 
 func nextDeleteMode(mode string) string {

@@ -17,10 +17,17 @@ import (
 	"goeverything/internal/scanner"
 )
 
+func newTestModel(t testing.TB, cfg config.Config) model {
+	t.Helper()
+	m := newModel(context.Background(), cfg)
+	m.saveConfig = func(config.Config) error { return nil }
+	return m
+}
+
 func TestSearchSettingsShortcutOpensConfig(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -38,7 +45,7 @@ func TestSearchSettingsShortcutOpensConfig(t *testing.T) {
 func TestNewModelStartsInStartupView(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -55,7 +62,7 @@ func TestNewModelStartsInStartupView(t *testing.T) {
 func TestSlashFromConfigDoesNotFocusSearch(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -73,7 +80,7 @@ func TestSlashFromConfigDoesNotFocusSearch(t *testing.T) {
 func TestSearchInputAllowsTypingJKWhenInputFocused(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -92,7 +99,7 @@ func TestSearchInputAllowsTypingJKWhenInputFocused(t *testing.T) {
 func TestSearchInputAllowsTypingTestWithoutOpeningSettings(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -116,7 +123,7 @@ func TestSearchInputAllowsTypingTestWithoutOpeningSettings(t *testing.T) {
 func TestSearchInputAllowsTypingDWhenInputFocused(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -138,7 +145,7 @@ func TestSearchInputAllowsTypingDWhenInputFocused(t *testing.T) {
 func TestSearchInputAllowsTypingSlash(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -156,7 +163,7 @@ func TestSearchInputAllowsTypingSlash(t *testing.T) {
 func TestSearchTabDoesNotSwitchFocus(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -186,7 +193,7 @@ func TestSearchTabDoesNotSwitchFocus(t *testing.T) {
 func TestSearchInputArrowDownNavigatesResults(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -212,7 +219,7 @@ func TestSearchInputArrowDownNavigatesResults(t *testing.T) {
 func TestSearchInputArrowUpNavigatesResults(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -240,7 +247,7 @@ func TestSearchInputArrowUpNavigatesResults(t *testing.T) {
 func TestSearchInputArrowDownWithoutResultsKeepsInput(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -262,7 +269,7 @@ func TestSearchInputArrowDownWithoutResultsKeepsInput(t *testing.T) {
 func TestSearchInputEnterOpensArrowSelectedResult(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -290,7 +297,7 @@ func TestSearchInputEnterOpensArrowSelectedResult(t *testing.T) {
 func TestSearchResultSelectionRendersFullRowWidth(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -316,10 +323,18 @@ func TestSearchResultSelectionRendersFullRowWidth(t *testing.T) {
 	t.Fatalf("selected row not found in rendered results:\n%s", out)
 }
 
+func maxRenderedLineWidth(block string) int {
+	maxWidth := 0
+	for _, line := range strings.Split(block, "\n") {
+		maxWidth = max(maxWidth, lipgloss.Width(line))
+	}
+	return maxWidth
+}
+
 func TestSearchCtrlDOpensDeleteConfirmationAndCancelKeepsResults(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -354,7 +369,7 @@ func TestSearchCtrlDOpensDeleteConfirmationAndCancelKeepsResults(t *testing.T) {
 func TestSearchDeleteKeyOpensDeleteConfirmation(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -375,7 +390,7 @@ func TestSearchDeleteKeyOpensDeleteConfirmation(t *testing.T) {
 func TestDeleteConfirmationEnterStartsDeleteCommand(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -401,7 +416,7 @@ func TestDeleteConfirmationEnterStartsDeleteCommand(t *testing.T) {
 func TestDeleteResultSuccessRemovesResultAndClampsCursor(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -435,7 +450,7 @@ func TestDeleteResultSuccessRemovesResultAndClampsCursor(t *testing.T) {
 func TestCountDoneAlwaysStartsInitialScanFromDefaultPath(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -462,7 +477,7 @@ func TestCountDoneAlwaysStartsInitialScanFromDefaultPath(t *testing.T) {
 func TestStartupViewShowsProgressByDefault(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -488,7 +503,7 @@ func TestStartupViewShowsProgressByDefault(t *testing.T) {
 func TestStartupSpaceDoesNotHideProgress(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -531,7 +546,7 @@ func TestStartupCtrlXCancelsAndOnlyCtrlQQuits(t *testing.T) {
 	t.Parallel()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -569,7 +584,7 @@ func TestStartupCtrlXCancelsAndOnlyCtrlQQuits(t *testing.T) {
 func TestScanProgressTickUpdatesStartupProgress(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -604,7 +619,7 @@ func TestScanProgressTickUpdatesStartupProgress(t *testing.T) {
 func TestInitialScanSuccessOpensSearch(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -630,7 +645,7 @@ func TestInitialScanSuccessOpensSearch(t *testing.T) {
 func TestInitialScanFailureOpensConfig(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -656,7 +671,7 @@ func TestInitialScanFailureOpensConfig(t *testing.T) {
 func TestManualScanSuccessReturnsToSearch(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -683,7 +698,7 @@ func TestManualScanSuccessReturnsToSearch(t *testing.T) {
 func TestCtrlGSwitchesToScanModal(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -715,7 +730,7 @@ func TestCtrlGSwitchesToScanModal(t *testing.T) {
 func TestEscFromConfigReturnsToSearch(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -772,8 +787,9 @@ func renderedHelpLine(t *testing.T, m model) int {
 	return 0
 }
 
-func modelWithManySearchRows() model {
-	m := newModel(context.Background(), config.Config{
+func modelWithManySearchRows(t testing.TB) model {
+	t.Helper()
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -804,7 +820,7 @@ func TestMouseHoverTracksInteractiveTargetsWithoutActivating(t *testing.T) {
 		Theme:           "tokyonight",
 	}
 
-	m := newModel(context.Background(), cfg)
+	m := newTestModel(t, cfg)
 	m.mode = viewConfig
 	m.cfgCursor = 0
 	updated, _ := m.Update(mouseEventIn(m.configRowHitbox(1), tea.MouseActionMotion, tea.MouseButtonNone))
@@ -816,7 +832,7 @@ func TestMouseHoverTracksInteractiveTargetsWithoutActivating(t *testing.T) {
 		t.Fatalf("hover should not activate config, cursor=%d modal=%v", next.cfgCursor, next.modal)
 	}
 
-	m = newModel(context.Background(), cfg)
+	m = newTestModel(t, cfg)
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{
 		{Name: "a.txt", Path: "/tmp/a.txt"},
@@ -836,7 +852,7 @@ func TestMouseHoverTracksInteractiveTargetsWithoutActivating(t *testing.T) {
 func TestSearchResultHitboxesMatchRenderedRows(t *testing.T) {
 	t.Parallel()
 
-	m := modelWithManySearchRows()
+	m := modelWithManySearchRows(t)
 	layout := m.searchMouseLayout()
 	if layout.visibleStart == layout.visibleEnd {
 		t.Fatalf("expected visible search rows")
@@ -858,7 +874,7 @@ func TestSearchResultHitboxesMatchRenderedRows(t *testing.T) {
 func TestSearchResultMouseActionsUseRenderedRowCoordinates(t *testing.T) {
 	t.Parallel()
 
-	m := modelWithManySearchRows()
+	m := modelWithManySearchRows(t)
 	layout := m.searchMouseLayout()
 	row := layout.visibleStart + 3
 	x := layout.resultX + 8
@@ -891,7 +907,7 @@ func TestSearchResultMouseActionsUseRenderedRowCoordinates(t *testing.T) {
 func TestMouseLeftClickActivatesConfigRows(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -908,7 +924,7 @@ func TestMouseLeftClickActivatesConfigRows(t *testing.T) {
 func TestSearchSettingsMouseClickOpensConfig(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -935,7 +951,7 @@ func TestSearchSettingsMouseClickOpensConfig(t *testing.T) {
 func TestSearchResultMouseClickDoubleClickAndRightClick(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -974,7 +990,7 @@ func TestSearchResultMouseClickDoubleClickAndRightClick(t *testing.T) {
 func TestSearchResultRightReleaseOpensDeleteConfirmation(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -998,7 +1014,7 @@ func TestSearchResultRightReleaseOpensDeleteConfirmation(t *testing.T) {
 func TestMouseWheelMovesSearchConfigAndModalCursors(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git", "node_modules"},
@@ -1018,7 +1034,7 @@ func TestMouseWheelMovesSearchConfigAndModalCursors(t *testing.T) {
 		t.Fatalf("expected wheel down to move search cursor to 1, searchCur=%d tableCursor=%d", next.searchCur, next.searchTable.Cursor())
 	}
 
-	m = newModel(context.Background(), m.cfg)
+	m = newTestModel(t, m.cfg)
 	m.mode = viewConfig
 	updated, _ = m.Update(mouseEventIn(m.configRowHitbox(0), tea.MouseActionPress, tea.MouseButtonWheelDown))
 	next = updated.(model)
@@ -1026,7 +1042,7 @@ func TestMouseWheelMovesSearchConfigAndModalCursors(t *testing.T) {
 		t.Fatalf("expected wheel down to move config cursor to 1, got %d", next.cfgCursor)
 	}
 
-	m = newModel(context.Background(), m.cfg)
+	m = newTestModel(t, m.cfg)
 	m.mode = viewConfig
 	m.modal = themeModal
 	m.cfgThemeCursor = 0
@@ -1040,7 +1056,7 @@ func TestMouseWheelMovesSearchConfigAndModalCursors(t *testing.T) {
 func TestConfigViewRendersOnNarrowTerminal(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~/Projects/Very/Long/Path/For/Testing/Responsiveness",
 		Excludes:        []string{".git", "Library/Caches/*"},
@@ -1062,10 +1078,68 @@ func TestConfigViewRendersOnNarrowTerminal(t *testing.T) {
 	}
 }
 
+func TestTopBarAndConfigViewUseFullWideTerminalWidth(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(t, config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git", "node_modules"},
+		Theme:           "tokyonight",
+	})
+	m.mode = viewConfig
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	next := updated.(model)
+	bodyW, _ := next.bodySize()
+
+	topW := maxRenderedLineWidth(next.renderTopBar())
+	if topW <= 120 || topW < bodyW {
+		t.Fatalf("expected top bar to use wide terminal width, got %d body width %d", topW, bodyW)
+	}
+
+	configW := maxRenderedLineWidth(next.viewConfig(bodyW, 30))
+	searchW := maxRenderedLineWidth(next.viewSearch(bodyW, 30))
+	if configW <= 120 || configW != searchW {
+		t.Fatalf("expected config width to match search width on wide terminal, config=%d search=%d", configW, searchW)
+	}
+}
+
+func TestConfigHitboxesUseFullWideTerminalLayout(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(t, config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git", "node_modules"},
+		Theme:           "tokyonight",
+	})
+	m.mode = viewConfig
+	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
+	next := updated.(model)
+	bodyW, _ := next.bodySize()
+	layout := configLayoutForWidth(bodyW)
+	if layout.outerWidth <= 120 {
+		t.Fatalf("expected wide config layout to exceed old 120-column cap, got %d", layout.outerWidth)
+	}
+
+	row := next.configRowHitbox(0)
+	if got, want := row.w, max(28, layout.leftW-4); got != want {
+		t.Fatalf("expected config row hitbox width %d, got %d", want, got)
+	}
+
+	exclude := next.configExcludeHitbox(0)
+	if got, want := exclude.x, next.contentStartX()+layout.leftW+layout.gap+1; got != want {
+		t.Fatalf("expected exclude hitbox x %d, got %d", want, got)
+	}
+	if got, want := exclude.w, max(22, layout.rightW-4); got != want {
+		t.Fatalf("expected exclude hitbox width %d, got %d", want, got)
+	}
+}
+
 func TestExcludeInputModalDoesNotOverflow(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -1096,7 +1170,7 @@ func TestConfigViewShowsAndTogglesDeleteMode(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -1118,10 +1192,41 @@ func TestConfigViewShowsAndTogglesDeleteMode(t *testing.T) {
 	}
 }
 
+func TestConfigActionsUseInjectedSaveConfig(t *testing.T) {
+	t.Parallel()
+
+	var saved []config.Config
+	m := newTestModel(t, config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+		DeleteMode:      config.DeleteModeTrash,
+	})
+	m.saveConfig = func(cfg config.Config) error {
+		saved = append(saved, cfg)
+		return nil
+	}
+	m.mode = viewConfig
+	m.cfgCursor = 2
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if next.err != nil {
+		t.Fatalf("did not expect save error: %v", next.err)
+	}
+	if len(saved) != 1 {
+		t.Fatalf("expected one injected save call, got %d", len(saved))
+	}
+	if saved[0].DeleteMode != config.DeleteModePermanent {
+		t.Fatalf("expected injected save to receive permanent delete mode, got %q", saved[0].DeleteMode)
+	}
+}
+
 func TestTopBarHidesIdleStatusWhenNotBusy(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -1145,7 +1250,7 @@ func TestTopBarHidesIdleStatusWhenNotBusy(t *testing.T) {
 func TestWindowSizeMsgStoresWidthAndHeight(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -1162,7 +1267,7 @@ func TestWindowSizeMsgStoresWidthAndHeight(t *testing.T) {
 func TestSearchViewRendersTableResults(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -1206,7 +1311,7 @@ func TestSearchViewRendersTableResults(t *testing.T) {
 func TestSearchViewEmptyResultsUsesStableResultsArea(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -1232,7 +1337,7 @@ func TestSearchViewEmptyResultsUsesStableResultsArea(t *testing.T) {
 func TestSearchHelpLineStaysFixedWithFewOrManyResults(t *testing.T) {
 	t.Parallel()
 
-	few := newModel(context.Background(), config.Config{
+	few := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -1246,7 +1351,7 @@ func TestSearchHelpLineStaysFixedWithFewOrManyResults(t *testing.T) {
 	updated, _ := few.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	few = updated.(model).syncSearchTableRows()
 
-	many := newModel(context.Background(), few.cfg)
+	many := newTestModel(t, few.cfg)
 	many.mode = viewSearch
 	for i := 0; i < 40; i++ {
 		many.searchRes = append(many.searchRes, db.Entry{
@@ -1272,7 +1377,7 @@ func TestSearchHelpLineStaysFixedWithFewOrManyResults(t *testing.T) {
 func TestSearchCtrlPNoLongerTogglesPathFilter(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -1319,7 +1424,7 @@ func TestOpenCommandRevealsPathByPlatform(t *testing.T) {
 func TestOnlyCtrlQQuitsFromSearch(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -1348,7 +1453,7 @@ func TestOnlyCtrlQQuitsFromSearch(t *testing.T) {
 func TestErrorRendersWithoutStatusFooter(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -1369,7 +1474,7 @@ func TestErrorRendersWithoutStatusFooter(t *testing.T) {
 func TestConfigModalReplacesCentralContent(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
@@ -1390,7 +1495,7 @@ func TestConfigModalReplacesCentralContent(t *testing.T) {
 func TestFullScreenFrameRendersBorder(t *testing.T) {
 	t.Parallel()
 
-	m := newModel(context.Background(), config.Config{
+	m := newTestModel(t, config.Config{
 		DBPath:          "/tmp/test.db",
 		DefaultScanPath: "~",
 		Excludes:        []string{".git"},
