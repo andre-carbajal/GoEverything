@@ -34,13 +34,19 @@ builds:
       - arm64
 
 archives:
-  - formats: [tar.gz]
-    builds:
+  - id: darwin
+    formats: [tar.gz]
+    ids:
       - ge-darwin
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+  - id: windows
+    formats: [zip]
+    ids:
       - ge-windows
-    format_overrides:
-      - goos: windows
-        formats: [zip]
     name_template: >-
       {{ .ProjectName }}_
       {{- .Version }}_
@@ -60,6 +66,8 @@ changelog:
 
 brews:
   - name: goeverything
+    ids:
+      - darwin
     directory: Formula
     repository:
       owner: andre-carbajal
@@ -67,6 +75,19 @@ brews:
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: https://github.com/andre-carbajal/GoEverything
     description: Fast local file indexing and search
-    license: MIT
+    license: GPL v3
     test: |
       system "#{bin}/ge", "--help"
+
+scoops:
+  - name: goeverything
+    ids:
+      - windows
+    repository:
+      owner: andre-carbajal
+      name: scoop-bucket
+      token: "{{ .Env.SCOOP_BUCKET_GITHUB_TOKEN }}"
+    homepage: https://github.com/andre-carbajal/GoEverything
+    description: Fast local file indexing and search
+    license: GPL v3
+    commit_msg_template: "Scoop update for {{ .ProjectName }} version {{ .Tag }}"
