@@ -1264,8 +1264,8 @@ func TestSearchHelpLineStaysFixedWithFewOrManyResults(t *testing.T) {
 		t.Fatalf("expected help line to stay fixed, few=%d many=%d\nfew:\n%s\nmany:\n%s", fewHelp, manyHelp, few.View(), many.View())
 	}
 	lines := strings.Split(few.View(), "\n")
-	if fewHelp < len(lines)-3 {
-		t.Fatalf("expected help line near bottom, got line %d of %d\n%s", fewHelp, len(lines), few.View())
+	if want := len(lines) - 2; fewHelp != want {
+		t.Fatalf("expected help line immediately above bottom border at line %d, got %d of %d\n%s", want, fewHelp, len(lines), few.View())
 	}
 }
 

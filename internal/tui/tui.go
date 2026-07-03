@@ -1346,23 +1346,7 @@ func (m model) renderFrame() string {
 	if m.modal != noModal {
 		content = m.renderModal(bodyW, contentH)
 	}
-	content = padBlockHeight(content, contentH, bodyW)
-
-	parts := make([]string, 0, 5)
-	parts = append(parts, top)
-	parts = append(parts, content)
-	if errLine != "" {
-		parts = append(parts, errLine)
-	}
-	prefixH := lipgloss.Height(lipgloss.JoinVertical(lipgloss.Left, parts...))
-	spacerH := max(0, bodyH-prefixH-lipgloss.Height(help))
-	if spacerH > 0 {
-		parts = append(parts, blankBlock(spacerH, bodyW))
-	}
-	parts = append(parts, help)
-
-	body := lipgloss.JoinVertical(lipgloss.Left, parts...)
-	body = lipgloss.NewStyle().Width(bodyW).Height(bodyH).Render(body)
+	body := fixedFooterBody(bodyW, bodyH, top, content, errLine, help)
 
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -1373,22 +1357,40 @@ func (m model) renderFrame() string {
 		Render(body)
 }
 
-func padBlockHeight(content string, height int, width int) string {
-	for lipgloss.Height(content) < height {
-		content += "\n" + strings.Repeat(" ", max(1, width))
+func fixedFooterBody(width int, height int, top string, content string, errLine string, help string) string {
+	lines := make([]string, 0, max(1, height))
+	lines = appendBlockLines(lines, top)
+	lines = appendBlockLines(lines, content)
+	if errLine != "" {
+		lines = appendBlockLines(lines, errLine)
 	}
-	return content
-}
 
-func blankBlock(height int, width int) string {
-	if height <= 0 {
-		return ""
+	helpLines := blockLines(help)
+	spacerH := max(0, height-len(lines)-len(helpLines))
+	for range spacerH {
+		lines = append(lines, strings.Repeat(" ", max(1, width)))
 	}
-	lines := make([]string, height)
-	for i := range lines {
-		lines[i] = strings.Repeat(" ", max(1, width))
+	lines = append(lines, helpLines...)
+
+	if len(lines) > height {
+		lines = lines[:height]
+		copy(lines[max(0, height-len(helpLines)):], helpLines)
+	}
+	for len(lines) < height {
+		lines = append(lines, strings.Repeat(" ", max(1, width)))
 	}
 	return strings.Join(lines, "\n")
+}
+
+func appendBlockLines(lines []string, block string) []string {
+	return append(lines, blockLines(block)...)
+}
+
+func blockLines(block string) []string {
+	if block == "" {
+		return nil
+	}
+	return strings.Split(block, "\n")
 }
 
 func (m model) renderContent(width, height int) string {
