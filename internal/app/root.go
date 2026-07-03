@@ -29,6 +29,7 @@ type options struct {
 	Batch   int
 	Workers int
 	Exclude []string
+	Backend string
 
 	SearchFormat string
 	SearchExt    string
@@ -43,7 +44,7 @@ func NewRootCommand() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "ge",
-		Short: "Fast local file index/search for macOS",
+		Short: "Fast local file index/search",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return tui.Run(cmd.Context(), cfg)
 		},
@@ -59,11 +60,11 @@ func NewRootCommand() *cobra.Command {
 				if cfg.DBPath != "" {
 					opt.DBPath = cfg.DBPath
 				} else {
-					dbPath, dbErr := config.ExpandPath("~/.config/ge/goeverything.db")
+					dbPath, dbErr := config.Path()
 					if dbErr != nil {
 						return dbErr
 					}
-					opt.DBPath = dbPath
+					opt.DBPath = filepath.Join(filepath.Dir(dbPath), "goeverything.db")
 				}
 			}
 			if opt.Batch <= 0 {
@@ -93,7 +94,7 @@ func NewRootCommand() *cobra.Command {
 	cmd.AddCommand(newReindexCommand(&opt))
 	cmd.AddCommand(newSearchCommand(&opt))
 	cmd.AddCommand(newDBCommand(&opt))
-	cmd.AddCommand(newWatchCommand(&opt))
+	cmd.AddCommand(newWatchCommand(&opt, &cfg))
 	cmd.AddCommand(newRootsCommand())
 
 	return cmd
@@ -130,6 +131,10 @@ func newScanCommand(opt *options, cfg *config.Config) *cobra.Command {
 				Workers: opt.Workers,
 				Batch:   opt.Batch,
 				Exclude: opt.Exclude,
+				Backend: opt.Backend,
+				Warning: func(message string) {
+					_, _ = fmt.Fprintf(os.Stderr, "warning: %s\n", message)
+				},
 			}
 			metrics, err := r.Scan(cmd.Context(), resolvedRoots)
 			if err != nil {
@@ -147,10 +152,14 @@ func newScanCommand(opt *options, cfg *config.Config) *cobra.Command {
 		},
 	}
 	command.Flags().StringVar(&opt.Root, "root", "", "Filesystem root to scan (default: roots from config)")
-	command.Flags().BoolVar(&opt.Roots, "all-roots", false, "Scan default roots (/, /Volumes/*)")
+	command.Flags().BoolVar(&opt.Roots, "all-roots", false, "Scan default platform roots")
 	command.Flags().IntVar(&opt.Workers, "workers", scanner.DefaultWorkerCount(), "Concurrent index workers")
 	command.Flags().IntVar(&opt.Batch, "batch", 2000, "Batch size for DB upserts")
 	command.Flags().StringSliceVar(&opt.Exclude, "exclude", nil, "Exclude patterns (name or relative glob)")
+	command.Flags().StringVar(&opt.Backend, "backend", scanner.BackendAuto, "Scan backend: auto|ntfs|walk")
+	command.PreRunE = func(_ *cobra.Command, _ []string) error {
+		return scanner.ValidateBackend(opt.Backend)
+	}
 	return command
 }
 
@@ -234,7 +243,7 @@ func newSearchCommand(opt *options) *cobra.Command {
 	return command
 }
 
-func newWatchCommand(opt *options) *cobra.Command {
+func newWatchCommand(opt *options, cfg *config.Config) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "watch",
 		Short: "Watch indexed root for real-time updates",
@@ -245,9 +254,13 @@ func newWatchCommand(opt *options) *cobra.Command {
 			}
 			defer func() { _ = store.Close() }()
 
-			root := opt.Root
+			root := strings.TrimSpace(opt.Root)
 			if root == "" {
-				root = "/"
+				root = cfg.DefaultScanPath
+			}
+			root, err = config.ExpandPath(root)
+			if err != nil {
+				return err
 			}
 
 			w := watcher.New(store)
@@ -257,7 +270,7 @@ func newWatchCommand(opt *options) *cobra.Command {
 			return nil
 		},
 	}
-	command.Flags().StringVar(&opt.Root, "root", "/", "Filesystem root to watch")
+	command.PersistentFlags().StringVar(&opt.Root, "root", "", "Filesystem root to watch (default: root from config)")
 
 	command.AddCommand(newWatchInstallCommand(opt))
 	command.AddCommand(newWatchUninstallCommand())

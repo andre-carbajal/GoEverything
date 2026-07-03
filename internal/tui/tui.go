@@ -1867,7 +1867,28 @@ func (m model) modalStyle(width int) lipgloss.Style {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.BorderHi).
 		Padding(1, 2).
-		Width(max(28, min(72, width-8)))
+		Width(m.modalWidth(width))
+}
+
+func (m model) modalWidth(width int) int {
+	return max(28, min(72, width-8))
+}
+
+func (m model) modalContentWidth(width int) int {
+	return max(20, m.modalWidth(width)-4)
+}
+
+func (m model) renderModalInput(width int) string {
+	contentW := max(18, m.modalContentWidth(width)-2)
+	inputW := max(12, contentW-4)
+	input := m.cfgInput
+	input.Width = inputW
+	return lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(m.theme.Input).
+		Padding(0, 1).
+		Width(contentW).
+		Render(input.View())
 }
 
 func (m model) renderPathModal(width int) string {
@@ -1879,11 +1900,7 @@ func (m model) renderPathModal(width int) string {
 		lines = append(lines,
 			"",
 			m.theme.Muted.Render("Custom scan path"),
-			lipgloss.NewStyle().
-				Border(lipgloss.RoundedBorder()).
-				BorderForeground(m.theme.Input).
-				Padding(0, 1).
-				Render(m.cfgInput.View()),
+			m.renderModalInput(width),
 		)
 		return m.modalStyle(width).Render(strings.Join(lines, "\n"))
 	}
@@ -1930,11 +1947,7 @@ func (m model) renderExcludeInputModal(width int) string {
 		m.theme.Title.Render("ADD EXCLUDE PATTERN"),
 		m.theme.Muted.Render("enter save • esc cancel"),
 		"",
-		lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).
-			BorderForeground(m.theme.Input).
-			Padding(0, 1).
-			Render(m.cfgInput.View()),
+		m.renderModalInput(width),
 	}
 	return m.modalStyle(width).Render(strings.Join(lines, "\n"))
 }

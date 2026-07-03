@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"goeverything/internal/scanner"
@@ -104,6 +105,14 @@ func Path() (string, error) {
 }
 
 func Dir() (string, error) {
+	if runtime.GOOS == "windows" {
+		if dir := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); dir != "" {
+			return filepath.Join(dir, "ge"), nil
+		}
+		if profile := strings.TrimSpace(os.Getenv("USERPROFILE")); profile != "" {
+			return filepath.Join(profile, ".config", "ge"), nil
+		}
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
@@ -179,7 +188,7 @@ func ExpandPath(path string) (string, error) {
 	if p == "" {
 		return "", errors.New("path is required")
 	}
-	if p == homeToken || strings.HasPrefix(p, homeToken+"/") {
+	if p == homeToken || strings.HasPrefix(p, homeToken+"/") || strings.HasPrefix(p, homeToken+`\`) {
 		home, err := os.UserHomeDir()
 		if err != nil {
 			return "", err
@@ -187,7 +196,8 @@ func ExpandPath(path string) (string, error) {
 		if p == homeToken {
 			return home, nil
 		}
-		p = filepath.Join(home, strings.TrimPrefix(p, homeToken+"/"))
+		p = strings.TrimPrefix(strings.TrimPrefix(p, homeToken+"/"), homeToken+`\`)
+		p = filepath.Join(home, p)
 	}
 	return filepath.Clean(p), nil
 }

@@ -3,6 +3,7 @@ package watcher
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"strings"
 
 	"goeverything/internal/db"
@@ -28,6 +29,9 @@ func WithPermissionHint(err error) error {
 	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "operation not permitted") || strings.Contains(msg, "permission denied") {
+		if runtime.GOOS == "windows" {
+			return fmt.Errorf("%w\nhint: run the terminal as Administrator or scan a user-owned folder", err)
+		}
 		return fmt.Errorf("%w\nhint: grant Full Disk Access to this terminal/app in System Settings > Privacy & Security > Full Disk Access", err)
 	}
 	return err

@@ -933,6 +933,37 @@ func TestConfigViewRendersOnNarrowTerminal(t *testing.T) {
 	}
 }
 
+func TestExcludeInputModalDoesNotOverflow(t *testing.T) {
+	t.Parallel()
+
+	m := newModel(context.Background(), config.Config{
+		DBPath:          "/tmp/test.db",
+		DefaultScanPath: "~",
+		Excludes:        []string{".git"},
+		Theme:           "tokyonight",
+		AutoScanOnStart: false,
+	})
+	m.modal = excludeInputModal
+	m.cfgInputActive = true
+	m.cfgInputTarget = "exclude"
+	m.cfgInput.Placeholder = "Add exclude (example: .git or Library/Caches/*)"
+	m.cfgInput.Prompt = "exclude> "
+	m.cfgInput.SetValue("")
+
+	width := 90
+	out := m.renderExcludeInputModal(width)
+	maxWidth := m.modalWidth(width) + 2
+	lines := strings.Split(out, "\n")
+	for _, line := range lines {
+		if got := lipgloss.Width(line); got > maxWidth {
+			t.Fatalf("modal line overflowed: width=%d max=%d line=%q\n%s", got, maxWidth, line, out)
+		}
+	}
+	if len(lines) > 10 {
+		t.Fatalf("modal input appears wrapped; got %d lines:\n%s", len(lines), out)
+	}
+}
+
 func TestConfigViewShowsAndTogglesDeleteMode(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)

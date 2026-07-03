@@ -1,21 +1,25 @@
 package scanner
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestExcludeMatcher(t *testing.T) {
 	t.Parallel()
 
-	matcher := newExcludeMatcher("/Users/test", []string{".git", "Library/Caches/*"})
+	root := filepath.Join(string(filepath.Separator), "Users", "test")
+	matcher := newExcludeMatcher(root, []string{".git", "Library/Caches/*"})
 
-	if !matcher("/Users/test/project/.git", true) {
+	if !matcher(filepath.Join(root, "project", ".git"), true) {
 		t.Fatalf("expected .git to be excluded")
 	}
 
-	if !matcher("/Users/test/Library/Caches/app/cache.db", false) {
+	if !matcher(filepath.Join(root, "Library", "Caches", "app", "cache.db"), false) {
 		t.Fatalf("expected Library/Caches/* to be excluded")
 	}
 
-	if matcher("/Users/test/Documents/report.txt", false) {
+	if matcher(filepath.Join(root, "Documents", "report.txt"), false) {
 		t.Fatalf("did not expect Documents/report.txt to be excluded")
 	}
 }

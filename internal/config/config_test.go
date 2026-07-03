@@ -3,26 +3,37 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
-func TestPathUsesDotConfigGe(t *testing.T) {
+func setTestHome(t *testing.T) string {
+	t.Helper()
 	home := t.TempDir()
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	t.Setenv("LOCALAPPDATA", filepath.Join(home, "AppData", "Local"))
+	return home
+}
+
+func TestPathUsesDotConfigGe(t *testing.T) {
+	home := setTestHome(t)
 
 	got, err := Path()
 	if err != nil {
 		t.Fatalf("path: %v", err)
 	}
 	want := filepath.Join(home, ".config", "ge", "config.json")
+	if runtime.GOOS == "windows" {
+		want = filepath.Join(home, "AppData", "Local", "ge", "config.json")
+	}
 	if got != want {
 		t.Fatalf("unexpected path:\nwant=%s\ngot=%s", want, got)
 	}
 }
 
 func TestLoadCreatesDefaultConfig(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t)
 
 	cfg, err := Load()
 	if err != nil {
@@ -48,8 +59,7 @@ func TestLoadCreatesDefaultConfig(t *testing.T) {
 }
 
 func TestLoadNormalizesInvalidDeleteModeToTrash(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t)
 
 	path, err := Path()
 	if err != nil {
@@ -80,8 +90,7 @@ func TestLoadNormalizesInvalidDeleteModeToTrash(t *testing.T) {
 }
 
 func TestLoadOldConfigWithoutDeleteModeDefaultsToTrash(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	setTestHome(t)
 
 	path, err := Path()
 	if err != nil {

@@ -14,7 +14,7 @@ import (
 func newWatchInstallCommand(opt *options) *cobra.Command {
 	return &cobra.Command{
 		Use:   "install",
-		Short: "Install watch as a launchd user service",
+		Short: "Install watch as a persistent user service",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			exe, err := os.Executable()
 			if err != nil {
@@ -37,7 +37,7 @@ func newWatchInstallCommand(opt *options) *cobra.Command {
 func newWatchUninstallCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "uninstall",
-		Short: "Uninstall launchd watch service",
+		Short: "Uninstall persistent watch service",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := watcher.UninstallLaunchAgent(); err != nil {
 				return err
@@ -51,7 +51,7 @@ func newWatchUninstallCommand() *cobra.Command {
 func newWatchStartCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "start",
-		Short: "Start launchd watch service",
+		Short: "Start persistent watch service",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := watcher.StartLaunchAgent(); err != nil {
 				return err
@@ -65,7 +65,7 @@ func newWatchStartCommand() *cobra.Command {
 func newWatchStopCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "stop",
-		Short: "Stop launchd watch service",
+		Short: "Stop persistent watch service",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := watcher.StopLaunchAgent(); err != nil {
 				return err
@@ -79,7 +79,7 @@ func newWatchStopCommand() *cobra.Command {
 func newWatchRestartCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "restart",
-		Short: "Restart launchd watch service",
+		Short: "Restart persistent watch service",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := watcher.RestartLaunchAgent(); err != nil {
 				return err
@@ -93,7 +93,7 @@ func newWatchRestartCommand() *cobra.Command {
 func newWatchStatusCommand() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Print launchd watch service status",
+		Short: "Print persistent watch service status",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			status, err := watcher.LaunchAgentStatus()
 			if status != "" {
@@ -108,7 +108,7 @@ func newWatchLogsCommand() *cobra.Command {
 	follow := false
 	command := &cobra.Command{
 		Use:   "logs",
-		Short: "Show launchd log file paths (or tail logs with --follow)",
+		Short: "Show persistent watch log file paths (or tail logs with --follow)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			stdout, stderr, err := watcher.LaunchAgentLogPaths()
 			if err != nil {

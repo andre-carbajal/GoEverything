@@ -4,11 +4,21 @@ import (
 	"context"
 	"database/sql"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	_ "modernc.org/sqlite"
 )
+
+func testPath(parts ...string) string {
+	all := append([]string{string(filepath.Separator)}, parts...)
+	return filepath.Join(all...)
+}
+
+func sqlString(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
 
 func TestStoreSearchFTSAndWildcard(t *testing.T) {
 	t.Parallel()
@@ -60,10 +70,11 @@ func TestStoreSearchAdvancedFiltersAndReindex(t *testing.T) {
 	defer func() { _ = store.Close() }()
 
 	now := time.Now()
+	root := testPath("Users", "a")
 	entries := []Entry{
-		NewEntryFromPath("/Users/a", "/Users/a/report.txt", 10, now, false),
-		NewEntryFromPath("/Users/a", "/Users/a/src/main.go", 20, now, false),
-		NewEntryFromPath("/Users/a", "/Users/a/src", 0, now, true),
+		NewEntryFromPath(root, filepath.Join(root, "report.txt"), 10, now, false),
+		NewEntryFromPath(root, filepath.Join(root, "src", "main.go"), 20, now, false),
+		NewEntryFromPath(root, filepath.Join(root, "src"), 0, now, true),
 	}
 	if err := store.UpsertBatch(ctx, entries); err != nil {
 		t.Fatalf("upsert: %v", err)
@@ -73,7 +84,7 @@ func TestStoreSearchAdvancedFiltersAndReindex(t *testing.T) {
 		Query:     "report",
 		OnlyFiles: true,
 		Ext:       ".txt",
-		Root:      "/Users/a",
+		Root:      root,
 		Limit:     10,
 	})
 	if err != nil {
@@ -108,16 +119,17 @@ func TestStoreSearchDoesNotMatchPathSegments(t *testing.T) {
 	defer func() { _ = store.Close() }()
 
 	now := time.Now()
+	root := testPath("Users", "a")
 	entries := []Entry{
-		NewEntryFromPath("/Users/a", "/Users/a/projects/go/main.go", 20, now, false),
-		NewEntryFromPath("/Users/a", "/Users/a/projects/js/index.js", 20, now, false),
+		NewEntryFromPath(root, filepath.Join(root, "projects", "go", "main.go"), 20, now, false),
+		NewEntryFromPath(root, filepath.Join(root, "projects", "js", "index.js"), 20, now, false),
 	}
 	if err := store.UpsertBatch(ctx, entries); err != nil {
 		t.Fatalf("upsert: %v", err)
 	}
 
 	got, err := store.SearchAdvanced(ctx, SearchOptions{
-		Query: "*projects/go*",
+		Query: "*" + filepath.Join("projects", "go") + "*",
 		Limit: 10,
 	})
 	if err != nil {
@@ -141,10 +153,12 @@ func TestStoreDirectoryDedupAndDelete(t *testing.T) {
 	defer func() { _ = store.Close() }()
 
 	now := time.Now()
+	root := testPath("Users", "a")
+	goDir := filepath.Join(root, "projects", "go")
 	entries := []Entry{
-		NewEntryFromPath("/Users/a", "/Users/a/projects/go/main.go", 10, now, false),
-		NewEntryFromPath("/Users/a", "/Users/a/projects/go/utils.go", 12, now, false),
-		NewEntryFromPath("/Users/a", "/Users/a/projects/js/index.js", 14, now, false),
+		NewEntryFromPath(root, filepath.Join(goDir, "main.go"), 10, now, false),
+		NewEntryFromPath(root, filepath.Join(goDir, "utils.go"), 12, now, false),
+		NewEntryFromPath(root, filepath.Join(root, "projects", "js", "index.js"), 14, now, false),
 	}
 	if err := store.UpsertBatch(ctx, entries); err != nil {
 		t.Fatalf("upsert: %v", err)
@@ -158,10 +172,10 @@ func TestStoreDirectoryDedupAndDelete(t *testing.T) {
 		t.Fatalf("expected 2 unique directories, got %d", dirs)
 	}
 
-	if err := store.DeleteByPath(ctx, "/Users/a/projects/go/utils.go"); err != nil {
+	if err := store.DeleteByPath(ctx, filepath.Join(goDir, "utils.go")); err != nil {
 		t.Fatalf("delete by path: %v", err)
 	}
-	if err := store.DeleteByPrefix(ctx, "/Users/a/projects/go"); err != nil {
+	if err := store.DeleteByPrefix(ctx, goDir); err != nil {
 		t.Fatalf("delete by prefix: %v", err)
 	}
 
@@ -187,6 +201,8 @@ func TestStoreMigratesLegacySchema(t *testing.T) {
 	defer func() { _ = legacySQL.Close() }()
 
 	// Simulate legacy schema with path stored directly in entries and FTS over path+name.
+	root := testPath("Users", "a")
+	fullPath := filepath.Join(root, "projects", "go", "main.go")
 	legacySchema := []string{
 		`DROP TRIGGER IF EXISTS entries_ai;`,
 		`DROP TRIGGER IF EXISTS entries_ad;`,
@@ -216,8 +232,7 @@ func TestStoreMigratesLegacySchema(t *testing.T) {
 		`CREATE TRIGGER entries_ai AFTER INSERT ON entries BEGIN
 			INSERT INTO entries_fts(rowid, name, path) VALUES (new.id, new.name, new.path);
 		END;`,
-		"INSERT" + " INTO entries(name, " + "path" + ", ext, size, mtime, is_dir, root, indexed_at)" +
-			" VALUES ('main.go', '/Users/a/projects/go/main.go', 'go', 10, 1, 0, '/Users/a', 1);",
+		"INSERT INTO entries(name, path, ext, size, mtime, is_dir, root, indexed_at) VALUES ('main.go', " + sqlString(fullPath) + ", 'go', 10, 1, 0, " + sqlString(root) + ", 1);",
 	}
 	for _, stmt := range legacySchema {
 		if _, err := legacySQL.ExecContext(ctx, stmt); err != nil {
@@ -243,7 +258,7 @@ func TestStoreMigratesLegacySchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("search migrated db: %v", err)
 	}
-	if len(got) != 1 || got[0].Path != "/Users/a/projects/go/main.go" {
+	if len(got) != 1 || got[0].Path != fullPath {
 		t.Fatalf("unexpected migrated search results: %+v", got)
 	}
 }

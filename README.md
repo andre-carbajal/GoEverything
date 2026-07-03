@@ -1,8 +1,8 @@
 # GoEverything
 
-Fast local file indexing and search for macOS (Everything-style), built with Go.
+Fast local file indexing and search for macOS and Windows (Everything-style), built with Go.
 
-> **Platform status:** GoEverything is currently **macOS-only** (official support).
+> **Platform status:** GoEverything supports macOS and Windows. Windows scans use an NTFS metadata backend when available and automatically fall back to a portable filesystem walk.
 
 ## What is GoEverything?
 
@@ -25,8 +25,14 @@ Use it when you want to:
 curl -fsSL https://raw.githubusercontent.com/andre-carbajal/GoEverything/main/scripts/install.sh | bash
 ```
 
+**Windows (PowerShell)**
+```powershell
+iwr https://raw.githubusercontent.com/andre-carbajal/GoEverything/main/scripts/install.ps1 -UseB | iex
+```
+
 You can also install a specific version:
 - macOS: `bash -s -- v0.1.0`
+- Windows: `.\install.ps1 -Version v0.1.0`
 
 ### Option 2: Build locally
 
@@ -77,6 +83,12 @@ ge roots
 ge scan --root "$HOME"
 ```
 
+Windows PowerShell:
+
+```powershell
+ge scan --root $env:USERPROFILE
+```
+
 ### 4) Search from CLI
 
 ```bash
@@ -92,6 +104,12 @@ ge search -q "*report*" --format json
 
 ```bash
 ge scan --root "$HOME"
+```
+
+Windows PowerShell:
+
+```powershell
+ge scan --root $env:USERPROFILE
 ```
 
 ### Find files by name/ext
@@ -119,6 +137,14 @@ ge watch install --root "$HOME"
 ge watch start
 ```
 
+Windows supports foreground watch:
+
+```powershell
+ge watch --root $env:USERPROFILE
+```
+
+Persistent `watch install/start/stop/status/logs` commands are currently macOS-only.
+
 ### Rebuild search index (without rescanning)
 
 ```bash
@@ -130,8 +156,10 @@ ge reindex
 ## Configuration
 
 Default paths:
-- Config: `~/.config/ge/config.json`
-- Database: `~/.config/ge/goeverything.db`
+- macOS/Linux config: `~/.config/ge/config.json`
+- macOS/Linux database: `~/.config/ge/goeverything.db`
+- Windows config: `%LOCALAPPDATA%\ge\config.json`
+- Windows database: `%LOCALAPPDATA%\ge\goeverything.db`
 
 Example `~/.config/ge/config.json`:
 
@@ -159,8 +187,9 @@ Notes:
 - Confirm DB path if using custom `--db`
 
 ### Permission issues
-- Some directories require extra macOS permissions.
+- Some directories require extra platform permissions.
 - Start with folders you own (`$HOME`) and expand gradually.
+- On Windows, the NTFS backend may require an elevated terminal for full-volume scans. In `--backend auto` mode, GoEverything falls back to the portable walker if NTFS metadata access is unavailable.
 
 ### Scan feels slow
 - Tune workers and batch size:
@@ -170,6 +199,7 @@ ge scan --root "$HOME" --workers 16 --batch 3000
 ```
 
 - Add excludes for heavy folders (`node_modules`, caches, build outputs).
+- On Windows, use `--backend ntfs` to require NTFS metadata scanning, `--backend walk` to force the portable scanner, or the default `--backend auto` to try NTFS first and fall back automatically.
 
 ---
 
@@ -179,7 +209,7 @@ ge scan --root "$HOME" --workers 16 --batch 3000
 - `--workers`: concurrent index workers
 - `--batch`: DB upsert batch size (default: 2000)
 - `--exclude`: skip names or root-relative globs
-- `--all-roots`: scan default roots (`/`, `/Volumes/*`)
+- `--all-roots`: scan default platform roots (`/`, `/Volumes/*`, or Windows drive roots like `C:\`)
 
 Example:
 

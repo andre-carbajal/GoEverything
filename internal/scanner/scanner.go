@@ -24,8 +24,10 @@ type Runner struct {
 	Workers int
 	Batch   int
 	Exclude []string
+	Backend string
 
 	Progress func(Progress)
+	Warning  func(string)
 }
 
 type Metrics struct {
@@ -43,6 +45,23 @@ type Progress struct {
 	Elapsed        time.Duration
 	FilesPerSecond float64
 	CurrentPath    string
+}
+
+const (
+	BackendAuto = "auto"
+	BackendWalk = "walk"
+	BackendNTFS = "ntfs"
+)
+
+type scanBackend interface {
+	Scan(ctx context.Context, roots []string, emit func(db.Entry) error, progress scanProgress) error
+}
+
+type scanProgress struct {
+	Scanned     *int64
+	Skipped     *int64
+	CurrentPath *atomic.Value
+	Emit        func()
 }
 
 func DefaultWorkerCount() int {
@@ -65,10 +84,6 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 		return Metrics{}, errors.New("at least one root is required")
 	}
 
-	workers := r.Workers
-	if workers <= 0 {
-		workers = DefaultWorkerCount()
-	}
 	batchSize := r.Batch
 	if batchSize <= 0 {
 		batchSize = 2000
@@ -146,55 +161,24 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 		}
 	}()
 
-	for _, root := range roots {
-		root := root
-		exclude := newExcludeMatcher(root, r.Exclude)
-		err := fastwalk.Walk(&fastwalk.Config{Follow: false, NumWorkers: workers}, root, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				currentPath.Store(path)
-				atomic.AddInt64(&skipped, 1)
-				emitProgress()
-				return nil
-			}
-
-			if exclude(path, d.IsDir()) {
-				if d.IsDir() {
-					return fastwalk.SkipDir
-				}
-				currentPath.Store(path)
-				atomic.AddInt64(&skipped, 1)
-				emitProgress()
-				return nil
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-
-			info, infoErr := d.Info()
-			if infoErr != nil {
-				atomic.AddInt64(&skipped, 1)
-				return nil
-			}
-
-			currentPath.Store(path)
-			atomic.AddInt64(&scanned, 1)
-			emitProgress()
-			entry := db.NewEntryFromPath(root, path, info.Size(), info.ModTime(), d.IsDir())
-
-			select {
-			case entriesCh <- entry:
-				return nil
-			case <-ctx.Done():
-				return ctx.Err()
-			}
-		})
-		if err != nil && !errors.Is(err, context.Canceled) {
-			close(entriesCh)
-			<-writerDone
-			return Metrics{}, err
+	emitEntry := func(entry db.Entry) error {
+		select {
+		case entriesCh <- entry:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
 		}
+	}
+	progress := scanProgress{
+		Scanned:     &scanned,
+		Skipped:     &skipped,
+		CurrentPath: &currentPath,
+		Emit:        emitProgress,
+	}
+	if err := r.backend().Scan(ctx, roots, emitEntry, progress); err != nil && !errors.Is(err, context.Canceled) {
+		close(entriesCh)
+		<-writerDone
+		return Metrics{}, err
 	}
 
 	close(entriesCh)
@@ -221,11 +205,83 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 	return metrics, nil
 }
 
+func (r Runner) backend() scanBackend {
+	backend := strings.ToLower(strings.TrimSpace(r.Backend))
+	if backend == "" {
+		backend = BackendAuto
+	}
+	if backend == BackendNTFS {
+		return ntfsBackend{}
+	}
+	if backend == BackendAuto {
+		return autoBackend{ntfs: ntfsBackend{}, walk: r.walkBackend(), warning: r.Warning}
+	}
+	return r.walkBackend()
+}
+
+func (r Runner) walkBackend() walkBackend {
+	workers := r.Workers
+	if workers <= 0 {
+		workers = DefaultWorkerCount()
+	}
+	return walkBackend{workers: workers, exclude: r.Exclude}
+}
+
 func sendErr(errCh chan error, err error) {
 	select {
 	case errCh <- err:
 	default:
 	}
+}
+
+type walkBackend struct {
+	workers int
+	exclude []string
+}
+
+func (b walkBackend) Scan(ctx context.Context, roots []string, emit func(db.Entry) error, progress scanProgress) error {
+	for _, root := range roots {
+		root := root
+		exclude := newExcludeMatcher(root, b.exclude)
+		err := fastwalk.Walk(&fastwalk.Config{Follow: false, NumWorkers: b.workers}, root, func(path string, d fs.DirEntry, err error) error {
+			if err != nil {
+				progress.CurrentPath.Store(path)
+				atomic.AddInt64(progress.Skipped, 1)
+				progress.Emit()
+				return nil
+			}
+
+			if exclude(path, d.IsDir()) {
+				if d.IsDir() {
+					return fastwalk.SkipDir
+				}
+				progress.CurrentPath.Store(path)
+				atomic.AddInt64(progress.Skipped, 1)
+				progress.Emit()
+				return nil
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+			}
+
+			info, infoErr := d.Info()
+			if infoErr != nil {
+				atomic.AddInt64(progress.Skipped, 1)
+				return nil
+			}
+
+			progress.CurrentPath.Store(path)
+			atomic.AddInt64(progress.Scanned, 1)
+			progress.Emit()
+			return emit(db.NewEntryFromPath(root, path, info.Size(), info.ModTime(), d.IsDir()))
+		})
+		if err != nil && !errors.Is(err, context.Canceled) {
+			return err
+		}
+	}
+	return nil
 }
 
 func newExcludeMatcher(root string, patterns []string) func(path string, isDir bool) bool {

@@ -8,7 +8,7 @@ before:
     - go vet ./...
 
 builds:
-  - id: ge
+  - id: ge-darwin
     main: ./cmd/ge
     binary: ge
     ldflags:
@@ -20,9 +20,27 @@ builds:
     goarch:
       - amd64
       - arm64
+  - id: ge-windows
+    main: ./cmd/ge
+    binary: ge
+    ldflags:
+      - -s -w
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+      - arm64
 
 archives:
   - formats: [tar.gz]
+    builds:
+      - ge-darwin
+      - ge-windows
+    format_overrides:
+      - goos: windows
+        formats: [zip]
     name_template: >-
       {{ .ProjectName }}_
       {{- .Version }}_
@@ -48,7 +66,7 @@ brews:
       name: homebrew-tap
       token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: https://github.com/andre-carbajal/GoEverything
-    description: Fast local file indexing and search for macOS (Everything-style)
+    description: Fast local file indexing and search
     license: MIT
     test: |
       system "#{bin}/ge", "--help"
