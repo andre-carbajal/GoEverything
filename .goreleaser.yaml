@@ -83,6 +83,7 @@ scoops:
   - name: goeverything
     ids:
       - windows
+    directory: bucket
     repository:
       owner: andre-carbajal
       name: scoop-bucket
