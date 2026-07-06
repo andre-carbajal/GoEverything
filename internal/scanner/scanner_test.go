@@ -1,8 +1,14 @@
 package scanner
 
 import (
+	"context"
+	"errors"
+	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"goeverything/internal/db"
 )
 
 func TestExcludeMatcher(t *testing.T) {
@@ -21,5 +27,153 @@ func TestExcludeMatcher(t *testing.T) {
 
 	if matcher(filepath.Join(root, "Documents", "report.txt"), false) {
 		t.Fatalf("did not expect Documents/report.txt to be excluded")
+	}
+}
+
+func TestRunnerPrunesDeletedFileAfterRescan(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	store := openTestStore(t)
+	defer func() { _ = store.Close() }()
+
+	target := filepath.Join(root, "ghost-file.txt")
+	if err := os.WriteFile(target, []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write target: %v", err)
+	}
+
+	r := Runner{Indexer: store, Backend: BackendWalk, Batch: 2}
+	if _, err := r.Scan(ctx, []string{root}); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	assertSearchCount(t, store, "ghost", 1)
+
+	if err := os.Remove(target); err != nil {
+		t.Fatalf("remove target: %v", err)
+	}
+	if _, err := r.Scan(ctx, []string{root}); err != nil {
+		t.Fatalf("second scan: %v", err)
+	}
+	assertSearchCount(t, store, "ghost", 0)
+}
+
+func TestRunnerPrunesDeletedDirectoryAfterRescan(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	store := openTestStore(t)
+	defer func() { _ = store.Close() }()
+
+	goneDir := filepath.Join(root, "gone")
+	if err := os.MkdirAll(filepath.Join(goneDir, "nested"), 0o755); err != nil {
+		t.Fatalf("make nested dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(goneDir, "nested", "nested-note.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write nested file: %v", err)
+	}
+
+	r := Runner{Indexer: store, Backend: BackendWalk, Batch: 2}
+	if _, err := r.Scan(ctx, []string{root}); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	assertSearchCount(t, store, "nested-note", 1)
+
+	if err := os.RemoveAll(goneDir); err != nil {
+		t.Fatalf("remove dir: %v", err)
+	}
+	if _, err := r.Scan(ctx, []string{root}); err != nil {
+		t.Fatalf("second scan: %v", err)
+	}
+	assertSearchCount(t, store, "nested-note", 0)
+}
+
+func TestRunnerPrunesNewlyExcludedPathsAfterRescan(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	root := t.TempDir()
+	store := openTestStore(t)
+	defer func() { _ = store.Close() }()
+
+	excludedDir := filepath.Join(root, "excluded")
+	if err := os.MkdirAll(excludedDir, 0o755); err != nil {
+		t.Fatalf("make excluded dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(excludedDir, "old-cache.txt"), []byte("hello"), 0o644); err != nil {
+		t.Fatalf("write excluded file: %v", err)
+	}
+
+	if _, err := (Runner{Indexer: store, Backend: BackendWalk, Batch: 2}).Scan(ctx, []string{root}); err != nil {
+		t.Fatalf("first scan: %v", err)
+	}
+	assertSearchCount(t, store, "old-cache", 1)
+
+	if _, err := (Runner{Indexer: store, Backend: BackendWalk, Batch: 2, Exclude: []string{"excluded"}}).Scan(ctx, []string{root}); err != nil {
+		t.Fatalf("excluded scan: %v", err)
+	}
+	assertSearchCount(t, store, "old-cache", 0)
+}
+
+func TestRunnerDoesNotPruneWhenCanceled(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	store := openTestStore(t)
+	defer func() { _ = store.Close() }()
+
+	stale := db.NewEntryFromPath(root, filepath.Join(root, "stale.txt"), 10, time.Now(), false)
+	if err := store.UpsertBatch(context.Background(), []db.Entry{stale}); err != nil {
+		t.Fatalf("upsert stale entry: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := (Runner{Indexer: store, Backend: BackendWalk}).Scan(ctx, []string{root})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	assertSearchCount(t, store, "stale", 1)
+}
+
+func TestRunnerDoesNotPruneWhenScanErrors(t *testing.T) {
+	t.Parallel()
+
+	root := filepath.Join(t.TempDir(), "missing")
+	store := openTestStore(t)
+	defer func() { _ = store.Close() }()
+
+	stale := db.NewEntryFromPath(root, filepath.Join(root, "stale.txt"), 10, time.Now(), false)
+	if err := store.UpsertBatch(context.Background(), []db.Entry{stale}); err != nil {
+		t.Fatalf("upsert stale entry: %v", err)
+	}
+
+	_, err := (Runner{Indexer: store, Backend: BackendWalk}).Scan(context.Background(), []string{root})
+	if err == nil {
+		t.Fatalf("expected scan error")
+	}
+	assertSearchCount(t, store, "stale", 1)
+}
+
+func openTestStore(t *testing.T) *db.Store {
+	t.Helper()
+
+	store, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	return store
+}
+
+func assertSearchCount(t *testing.T, store *db.Store, query string, want int) {
+	t.Helper()
+
+	got, err := store.Search(context.Background(), query, 10, 0)
+	if err != nil {
+		t.Fatalf("search %q: %v", query, err)
+	}
+	if len(got) != want {
+		t.Fatalf("search %q: expected %d results, got %+v", query, want, got)
 	}
 }

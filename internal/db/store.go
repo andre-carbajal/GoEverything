@@ -421,37 +421,15 @@ func (s *Store) DeleteByPrefix(ctx context.Context, prefix string) error {
 	if strings.TrimSpace(prefix) == "" {
 		return nil
 	}
-	clean := filepath.Clean(prefix)
 
-	subQuery := s.bun.NewSelect().
-		TableExpr("entries AS e").
-		Column("e.id").
-		Join("JOIN directories AS d ON d.id = e.dir_id").
-		Where("d.path = ?", clean).
-		WhereOr("d.path LIKE ?", clean+"/%").
-		WhereOr("(CASE WHEN d.path = '/' THEN '/' || e.name ELSE d.path || '/' || e.name END) = ?", clean).
-		WhereOr("(CASE WHEN d.path = '/' THEN '/' || e.name ELSE d.path || '/' || e.name END) LIKE ?", clean+"/%")
-
-	_, err := s.bun.NewDelete().
-		Model((*EntryModel)(nil)).
-		Where("id IN (?)", subQuery).
-		Exec(ctx)
-	if err != nil {
+	if err := deleteEntriesByPrefixes(ctx, s.db, []string{prefix}); err != nil {
 		return err
 	}
 	return s.pruneEmptyDirectories(ctx)
 }
 
 func (s *Store) pruneEmptyDirectories(ctx context.Context) error {
-	subQuery := s.bun.NewSelect().
-		TableExpr("entries").
-		ColumnExpr("DISTINCT dir_id")
-
-	_, err := s.bun.NewDelete().
-		Model((*DirectoryModel)(nil)).
-		Where("id NOT IN (?)", subQuery).
-		Exec(ctx)
-	return err
+	return pruneEmptyDirectoriesWith(ctx, s.db)
 }
 
 func (s *Store) Search(ctx context.Context, query string, limit, offset int) ([]Entry, error) {

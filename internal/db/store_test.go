@@ -188,6 +188,99 @@ func TestStoreDirectoryDedupAndDelete(t *testing.T) {
 	}
 }
 
+func TestStoreDeleteByPrefixRemovesNestedDescendants(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	store, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	now := time.Now()
+	root := testPath("Users", "a")
+	prefix := filepath.Join(root, "projects", "go")
+	keepPath := filepath.Join(root, "projects", "js", "index.js")
+	entries := []Entry{
+		NewEntryFromPath(root, filepath.Join(prefix, "pkg", "main.go"), 10, now, false),
+		NewEntryFromPath(root, filepath.Join(prefix, "pkg", "readme.md"), 12, now, false),
+		NewEntryFromPath(root, keepPath, 14, now, false),
+	}
+	if err := store.UpsertBatch(ctx, entries); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	if err := store.DeleteByPrefix(ctx, prefix); err != nil {
+		t.Fatalf("delete by prefix: %v", err)
+	}
+
+	got, err := store.Search(ctx, "main", 10, 0)
+	if err != nil {
+		t.Fatalf("search deleted nested file: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected nested descendant to be deleted, got %+v", got)
+	}
+
+	got, err = store.Search(ctx, "index", 10, 0)
+	if err != nil {
+		t.Fatalf("search kept file: %v", err)
+	}
+	if len(got) != 1 || got[0].Path != keepPath {
+		t.Fatalf("expected unrelated file to remain, got %+v", got)
+	}
+}
+
+func TestStoreFinishScanPrunesMissingAndKeepsProtectedPrefixes(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	store, err := Open(ctx, dbPath)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	now := time.Now()
+	root := testPath("Users", "a")
+	protectedDir := filepath.Join(root, "private")
+	keep := NewEntryFromPath(root, filepath.Join(root, "keep.txt"), 10, now, false)
+	stale := NewEntryFromPath(root, filepath.Join(root, "stale.txt"), 10, now, false)
+	protected := NewEntryFromPath(root, filepath.Join(protectedDir, "secret.txt"), 10, now, false)
+	if err := store.UpsertBatch(ctx, []Entry{keep, stale, protected}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+
+	sessionID, err := store.BeginScan(ctx, []string{root})
+	if err != nil {
+		t.Fatalf("begin scan: %v", err)
+	}
+	if err := store.MarkSeenBatch(ctx, sessionID, []Entry{keep}); err != nil {
+		t.Fatalf("mark seen: %v", err)
+	}
+	if err := store.MarkUnreadablePrefix(ctx, sessionID, protectedDir); err != nil {
+		t.Fatalf("mark protected: %v", err)
+	}
+	if err := store.FinishScan(ctx, sessionID, []string{root}); err != nil {
+		t.Fatalf("finish scan: %v", err)
+	}
+
+	for query, want := range map[string]int{"keep": 1, "secret": 1, "stale": 0} {
+		got, err := store.Search(ctx, query, 10, 0)
+		if err != nil {
+			t.Fatalf("search %q: %v", query, err)
+		}
+		if len(got) != want {
+			t.Fatalf("search %q: expected %d results, got %+v", query, want, got)
+		}
+	}
+}
+
 func TestStoreMigratesLegacySchema(t *testing.T) {
 	t.Parallel()
 

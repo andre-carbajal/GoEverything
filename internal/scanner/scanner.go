@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -17,6 +18,14 @@ import (
 
 type Indexer interface {
 	UpsertBatch(ctx context.Context, entries []db.Entry) error
+}
+
+type Reconciler interface {
+	BeginScan(ctx context.Context, roots []string) (int64, error)
+	MarkSeenBatch(ctx context.Context, sessionID int64, entries []db.Entry) error
+	MarkUnreadablePrefix(ctx context.Context, sessionID int64, path string) error
+	FinishScan(ctx context.Context, sessionID int64, roots []string) error
+	AbortScan(ctx context.Context, sessionID int64) error
 }
 
 type Runner struct {
@@ -62,6 +71,7 @@ type scanProgress struct {
 	Skipped     *int64
 	CurrentPath *atomic.Value
 	Emit        func()
+	Protect     func(string)
 }
 
 func DefaultWorkerCount() int {
@@ -83,6 +93,25 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 	if len(roots) == 0 {
 		return Metrics{}, errors.New("at least one root is required")
 	}
+	roots = cleanRoots(roots)
+
+	reconciler, reconcile := r.Indexer.(Reconciler)
+	sessionID := int64(0)
+	if reconcile {
+		id, err := reconciler.BeginScan(ctx, roots)
+		if err != nil {
+			return Metrics{}, err
+		}
+		sessionID = id
+		defer func() {
+			if sessionID == 0 {
+				return
+			}
+			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = reconciler.AbortScan(cleanupCtx, sessionID)
+		}()
+	}
 
 	batchSize := r.Batch
 	if batchSize <= 0 {
@@ -98,6 +127,8 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 		skipped int64
 	)
 	var currentPath atomic.Value
+	protected := make(map[string]struct{})
+	var protectedMu sync.Mutex
 
 	emitProgress := func() {
 		if r.Progress == nil {
@@ -132,6 +163,11 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 			}
 			if err := r.Indexer.UpsertBatch(ctx, batch); err != nil {
 				return err
+			}
+			if reconcile {
+				if err := reconciler.MarkSeenBatch(ctx, sessionID, batch); err != nil {
+					return err
+				}
 			}
 			atomic.AddInt64(&indexed, int64(len(batch)))
 			batch = batch[:0]
@@ -174,11 +210,26 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 		Skipped:     &skipped,
 		CurrentPath: &currentPath,
 		Emit:        emitProgress,
+		Protect: func(path string) {
+			path = strings.TrimSpace(path)
+			if path == "" {
+				return
+			}
+			protectedMu.Lock()
+			protected[filepath.Clean(path)] = struct{}{}
+			protectedMu.Unlock()
+		},
 	}
-	if err := r.backend().Scan(ctx, roots, emitEntry, progress); err != nil && !errors.Is(err, context.Canceled) {
+	if err := r.backend().Scan(ctx, roots, emitEntry, progress); err != nil {
 		close(entriesCh)
 		<-writerDone
 		return Metrics{}, err
+	}
+
+	if ctx.Err() != nil {
+		close(entriesCh)
+		<-writerDone
+		return Metrics{}, ctx.Err()
 	}
 
 	close(entriesCh)
@@ -188,6 +239,9 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 	case err := <-errCh:
 		return Metrics{}, err
 	default:
+	}
+	if ctx.Err() != nil {
+		return Metrics{}, ctx.Err()
 	}
 
 	elapsed := time.Since(start)
@@ -199,6 +253,24 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 	}
 	if elapsed > 0 {
 		metrics.FilesPerSecond = float64(metrics.Scanned) / elapsed.Seconds()
+	}
+	if reconcile {
+		protectedMu.Lock()
+		protectedPaths := make([]string, 0, len(protected))
+		for path := range protected {
+			protectedPaths = append(protectedPaths, path)
+		}
+		protectedMu.Unlock()
+
+		for _, path := range protectedPaths {
+			if err := reconciler.MarkUnreadablePrefix(ctx, sessionID, path); err != nil {
+				return Metrics{}, err
+			}
+		}
+		if err := reconciler.FinishScan(ctx, sessionID, roots); err != nil {
+			return Metrics{}, err
+		}
+		sessionID = 0
 	}
 	emitProgress()
 
@@ -234,6 +306,18 @@ func sendErr(errCh chan error, err error) {
 	}
 }
 
+func cleanRoots(roots []string) []string {
+	out := make([]string, 0, len(roots))
+	for _, root := range roots {
+		root = strings.TrimSpace(root)
+		if root == "" {
+			continue
+		}
+		out = append(out, filepath.Clean(root))
+	}
+	return out
+}
+
 type walkBackend struct {
 	workers int
 	exclude []string
@@ -248,6 +332,12 @@ func (b walkBackend) Scan(ctx context.Context, roots []string, emit func(db.Entr
 				progress.CurrentPath.Store(path)
 				atomic.AddInt64(progress.Skipped, 1)
 				progress.Emit()
+				if filepath.Clean(path) == filepath.Clean(root) {
+					return err
+				}
+				if progress.Protect != nil {
+					progress.Protect(path)
+				}
 				return nil
 			}
 
@@ -269,6 +359,9 @@ func (b walkBackend) Scan(ctx context.Context, roots []string, emit func(db.Entr
 			info, infoErr := d.Info()
 			if infoErr != nil {
 				atomic.AddInt64(progress.Skipped, 1)
+				if progress.Protect != nil {
+					progress.Protect(path)
+				}
 				return nil
 			}
 
