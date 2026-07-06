@@ -59,8 +59,8 @@ brew install goeverything
 **Scoop**
 
 ```powershell
-scoop bucket add andre https://github.com/andre-carbajal/scoop-bucket
-scoop install andre/goeverything
+scoop bucket add andre-carbajal https://github.com/andre-carbajal/scoop-bucket
+scoop install andre-carbajal/goeverything
 ```
 
 ---
