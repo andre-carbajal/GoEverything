@@ -1995,15 +1995,6 @@ func deleteResultCmd(ctx context.Context, cfg config.Config, entry db.Entry, ind
 	}
 }
 
-func moveToTrash(path string) error {
-	script := `tell application "Finder" to delete POSIX file ` + appleScriptQuote(path)
-	return exec.Command("osascript", "-e", script).Run()
-}
-
-func appleScriptQuote(value string) string {
-	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(value) + `"`
-}
-
 func debounceCmd(seq int, query string) tea.Cmd {
 	return tea.Tick(180*time.Millisecond, func(time.Time) tea.Msg {
 		return debounceSearchMsg{seq: seq, query: query}

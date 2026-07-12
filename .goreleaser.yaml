@@ -13,6 +13,7 @@ builds:
     binary: ge
     ldflags:
       - -s -w
+      - -X goeverything/internal/app.Version={{ .Version }}
     env:
       - CGO_ENABLED=1
     goos:
@@ -25,6 +26,7 @@ builds:
     binary: ge
     ldflags:
       - -s -w
+      - -X goeverything/internal/app.Version={{ .Version }}
     env:
       - CGO_ENABLED=0
     goos:
@@ -35,7 +37,7 @@ builds:
 
 archives:
   - id: darwin
-    formats: [tar.gz]
+    formats: [ tar.gz ]
     ids:
       - ge-darwin
     name_template: >-
@@ -44,7 +46,7 @@ archives:
       {{- .Os }}_
       {{- .Arch }}
   - id: windows
-    formats: [zip]
+    formats: [ zip ]
     ids:
       - ge-windows
     name_template: >-

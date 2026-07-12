@@ -19,6 +19,10 @@ import (
 	"goeverything/internal/watcher"
 )
 
+// Version identifies development builds. GoReleaser replaces it with the tag
+// version so release builds report the exact version they came from.
+var Version = "dev"
+
 type options struct {
 	DBPath  string
 	Root    string
@@ -43,8 +47,9 @@ func NewRootCommand() *cobra.Command {
 	cfg := config.Config{}
 
 	cmd := &cobra.Command{
-		Use:   "ge",
-		Short: "Fast local file index/search",
+		Use:     "ge",
+		Short:   "Fast local file index/search",
+		Version: Version,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return tui.Run(cmd.Context(), cfg)
 		},
