@@ -1461,7 +1461,7 @@ func (m model) renderTopBar() string {
 
 	scopeLen := max(8, innerWidth/4)
 	basePlain := fmt.Sprintf("◌ GoEverything %d indexed scope %s", m.totalIndexed, trimMiddle(m.cfg.DefaultScanPath, scopeLen))
-	lastPlain := "last scan " + prettyElapsed(m.lastMetrics.Elapsed)
+	lastPlain := "scan took " + prettyDuration(m.lastMetrics.Elapsed)
 
 	lastView := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
@@ -1822,19 +1822,6 @@ func (m model) renderDeleteConfirmModal(width int) string {
 		m.theme.Muted.Render("enter/y confirm • esc/n cancel"),
 	}
 	return m.modalStyle(width).Render(strings.Join(lines, "\n"))
-}
-
-func prettyElapsed(d time.Duration) string {
-	if d <= 0 {
-		return "just now"
-	}
-	if d < time.Minute {
-		return fmt.Sprintf("%ds ago", int(d.Seconds()))
-	}
-	if d < time.Hour {
-		return fmt.Sprintf("%dm ago", int(d.Minutes()))
-	}
-	return fmt.Sprintf("%dh ago", int(d.Hours()))
 }
 
 func prettyDuration(d time.Duration) string {
