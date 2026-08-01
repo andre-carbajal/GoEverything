@@ -188,6 +188,145 @@ func TestStoreDirectoryDedupAndDelete(t *testing.T) {
 	}
 }
 
+func TestStoreUpdateDirectorySizesBatch(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "sizes.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	root := testPath("sizes", "root")
+	nested := filepath.Join(root, "nested")
+	empty := filepath.Join(root, "empty")
+	entries := []Entry{
+		NewEntryFromPath(root, root, 0, time.Now(), true),
+		NewEntryFromPath(root, nested, 0, time.Now(), true),
+		NewEntryFromPath(root, empty, 0, time.Now(), true),
+		NewEntryFromPath(root, filepath.Join(nested, "one.bin"), 12, time.Now(), false),
+		NewEntryFromPath(root, filepath.Join(nested, "two.bin"), 30, time.Now(), false),
+	}
+	if err := store.UpsertBatch(ctx, entries); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := store.UpdateDirectorySizes(ctx, map[string]int64{root: 42, nested: 42, empty: 0}); err != nil {
+		t.Fatalf("update directory sizes: %v", err)
+	}
+
+	for path, want := range map[string]int64{root: 42, nested: 42, empty: 0} {
+		got := findEntryByPath(t, store, path, true)
+		if got.Size != want {
+			t.Fatalf("directory %q size: want %d, got %d", path, want, got.Size)
+		}
+	}
+}
+
+func TestStoreWatcherDirectorySizeDeltas(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "watcher-sizes.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	root := testPath("watcher", "root")
+	nested := filepath.Join(root, "nested")
+	target := filepath.Join(nested, "data.bin")
+	entries := []Entry{
+		NewEntryFromPath(root, root, 0, time.Now(), true),
+		NewEntryFromPath(root, nested, 0, time.Now(), true),
+		NewEntryFromPath(root, target, 10, time.Now(), false),
+	}
+	if err := store.UpsertBatch(ctx, entries); err != nil {
+		t.Fatalf("initial upsert: %v", err)
+	}
+	if err := store.UpdateDirectorySizes(ctx, map[string]int64{root: 10, nested: 10}); err != nil {
+		t.Fatalf("initial sizes: %v", err)
+	}
+
+	updated := NewEntryFromPath(root, target, 25, time.Now(), false)
+	if err := store.UpsertBatchWithDirectorySizes(ctx, []Entry{updated}); err != nil {
+		t.Fatalf("updated file: %v", err)
+	}
+	if got := findEntryByPath(t, store, root, true).Size; got != 25 {
+		t.Fatalf("root size after update: want 25, got %d", got)
+	}
+	if got := findEntryByPath(t, store, nested, true).Size; got != 25 {
+		t.Fatalf("nested size after update: want 25, got %d", got)
+	}
+
+	if err := store.DeleteByPathWithDirectorySize(ctx, target); err != nil {
+		t.Fatalf("delete file: %v", err)
+	}
+	if got := findEntryByPath(t, store, root, true).Size; got != 0 {
+		t.Fatalf("root size after delete: want 0, got %d", got)
+	}
+	if got := findEntryByPath(t, store, nested, true).Size; got != 0 {
+		t.Fatalf("nested size after delete: want 0, got %d", got)
+	}
+}
+
+func TestStoreDirectoryDeleteSubtractsSubtreeSize(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "subtree-sizes.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	root := testPath("subtree", "root")
+	removed := filepath.Join(root, "removed")
+	keep := filepath.Join(root, "keep")
+	entries := []Entry{
+		NewEntryFromPath(root, root, 0, time.Now(), true),
+		NewEntryFromPath(root, removed, 0, time.Now(), true),
+		NewEntryFromPath(root, keep, 0, time.Now(), true),
+		NewEntryFromPath(root, filepath.Join(removed, "a.bin"), 7, time.Now(), false),
+		NewEntryFromPath(root, filepath.Join(removed, "b.bin"), 11, time.Now(), false),
+		NewEntryFromPath(root, filepath.Join(keep, "c.bin"), 5, time.Now(), false),
+	}
+	if err := store.UpsertBatch(ctx, entries); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := store.UpdateDirectorySizes(ctx, map[string]int64{root: 23, removed: 18, keep: 5}); err != nil {
+		t.Fatalf("initial sizes: %v", err)
+	}
+	if err := store.DeleteByPrefixWithDirectorySize(ctx, removed); err != nil {
+		t.Fatalf("delete subtree: %v", err)
+	}
+	if got := findEntryByPath(t, store, root, true).Size; got != 5 {
+		t.Fatalf("root size after subtree delete: want 5, got %d", got)
+	}
+	if got := findEntryByPath(t, store, keep, true).Size; got != 5 {
+		t.Fatalf("keep size after subtree delete: want 5, got %d", got)
+	}
+}
+
+func findEntryByPath(t *testing.T, store *Store, path string, onlyDir bool) Entry {
+	t.Helper()
+	results, err := store.SearchAdvanced(context.Background(), SearchOptions{
+		Query:    filepath.Base(path),
+		OnlyDirs: onlyDir,
+		Limit:    100,
+	})
+	if err != nil {
+		t.Fatalf("search %q: %v", path, err)
+	}
+	for _, entry := range results {
+		if filepath.Clean(entry.Path) == filepath.Clean(path) {
+			return entry
+		}
+	}
+	t.Fatalf("entry %q not found in %+v", path, results)
+	return Entry{}
+}
+
 func TestStoreDeleteByPrefixRemovesNestedDescendants(t *testing.T) {
 	t.Parallel()
 

@@ -15,6 +15,13 @@ type IndexStore interface {
 	DeleteByPrefix(ctx context.Context, prefix string) error
 }
 
+type SizeAwareIndexStore interface {
+	UpsertBatchWithDirectorySizes(ctx context.Context, entries []db.Entry) error
+	DeleteByPathWithDirectorySize(ctx context.Context, path string) error
+	DeleteByPrefixWithDirectorySize(ctx context.Context, prefix string) error
+	RecalculateDirectorySizes(ctx context.Context, roots []string) error
+}
+
 type Watcher struct {
 	store   IndexStore
 	exclude []string
@@ -40,4 +47,42 @@ func WithPermissionHint(err error) error {
 		}
 	}
 	return err
+}
+
+func upsertWatchedEntries(ctx context.Context, store IndexStore, entries []db.Entry) error {
+	if sizeAware, ok := store.(SizeAwareIndexStore); ok {
+		return sizeAware.UpsertBatchWithDirectorySizes(ctx, entries)
+	}
+	return store.UpsertBatch(ctx, entries)
+}
+
+func deleteWatchedPath(ctx context.Context, store IndexStore, path string) error {
+	if sizeAware, ok := store.(SizeAwareIndexStore); ok {
+		return sizeAware.DeleteByPathWithDirectorySize(ctx, path)
+	}
+	return store.DeleteByPath(ctx, path)
+}
+
+func deleteWatchedPrefix(ctx context.Context, store IndexStore, prefix string) error {
+	if sizeAware, ok := store.(SizeAwareIndexStore); ok {
+		return sizeAware.DeleteByPrefixWithDirectorySize(ctx, prefix)
+	}
+	return store.DeleteByPrefix(ctx, prefix)
+}
+
+func deleteWatchedPathAndDescendants(ctx context.Context, store IndexStore, path string) error {
+	if _, ok := store.(SizeAwareIndexStore); ok {
+		return deleteWatchedPrefix(ctx, store, path)
+	}
+	if err := store.DeleteByPath(ctx, path); err != nil {
+		return err
+	}
+	return store.DeleteByPrefix(ctx, path)
+}
+
+func recalculateWatchedDirectories(ctx context.Context, store IndexStore, roots []string) error {
+	if sizeAware, ok := store.(SizeAwareIndexStore); ok {
+		return sizeAware.RecalculateDirectorySizes(ctx, roots)
+	}
+	return nil
 }

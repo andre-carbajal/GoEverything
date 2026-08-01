@@ -141,11 +141,11 @@ func (w *Watcher) applyLinuxEvent(ctx context.Context, notifier *fsnotify.Watche
 	path := filepath.Clean(event.Name)
 	if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
 		if _, isDir := watched[path]; isDir {
-			if err := w.store.DeleteByPrefix(ctx, path); err != nil {
+			if err := deleteWatchedPrefix(ctx, w.store, path); err != nil {
 				return err
 			}
 			removeWatchedPrefix(watched, path)
-		} else if err := w.store.DeleteByPath(ctx, path); err != nil {
+		} else if err := deleteWatchedPath(ctx, w.store, path); err != nil {
 			return err
 		}
 		return nil
@@ -185,6 +185,9 @@ func (w *Watcher) scanChangedDirectory(ctx context.Context, path string) error {
 		Exclude: exclude,
 		Backend: scanner.BackendWalk,
 	}).Scan(ctx, []string{path})
+	if err == nil {
+		err = recalculateWatchedDirectories(ctx, w.store, []string{path})
+	}
 	return err
 }
 
@@ -198,7 +201,7 @@ func upsertLinuxPath(ctx context.Context, store IndexStore, root, path string) e
 	}
 	entry := db.NewEntryFromPath(root, path, info.Size(), info.ModTime(), info.IsDir())
 	for attempt := 0; attempt < 3; attempt++ {
-		if err := store.UpsertBatch(ctx, []db.Entry{entry}); err == nil {
+		if err := upsertWatchedEntries(ctx, store, []db.Entry{entry}); err == nil {
 			return nil
 		}
 		select {
@@ -207,7 +210,7 @@ func upsertLinuxPath(ctx context.Context, store IndexStore, root, path string) e
 		case <-time.After(time.Duration(attempt+1) * 25 * time.Millisecond):
 		}
 	}
-	return store.UpsertBatch(ctx, []db.Entry{entry})
+	return upsertWatchedEntries(ctx, store, []db.Entry{entry})
 }
 
 func removeWatchedPrefix(watched map[string]struct{}, prefix string) {

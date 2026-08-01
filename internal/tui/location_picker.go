@@ -111,6 +111,7 @@ func (m model) updateLocation(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.locationInput, cmd = m.locationInput.Update(msg)
+	m.locationInput = cleanMouseSequences(m.locationInput)
 	m.locationInputSeq++
 	m.locationSuggestionCursor = -1
 	m.locationSuggestionActive = false

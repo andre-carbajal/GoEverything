@@ -162,7 +162,6 @@ func (s *Store) migrateLegacyPathSchema(ctx context.Context) error {
 		}
 	}
 
-	//noinspection SqlResolve,SqlRedundantOrderingDirection
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, name, path, ext, size, mtime, is_dir, root, indexed_at
 		FROM entries
@@ -184,7 +183,6 @@ func (s *Store) migrateLegacyPathSchema(ctx context.Context) error {
 	}
 	defer func() { _ = selectDirID.Close() }()
 
-	//noinspection SqlResolve
 	insertEntry, err := tx.PrepareContext(ctx, `
 		INSERT INTO entries_v2(id, name, dir_id, ext, size, mtime, is_dir, root, indexed_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -230,7 +228,6 @@ func (s *Store) migrateLegacyPathSchema(ctx context.Context) error {
 		return err
 	}
 
-	//noinspection SqlResolve
 	swap := []string{
 		`DROP TABLE entries;`,
 		`ALTER TABLE entries_v2 RENAME TO entries;`,
@@ -311,85 +308,387 @@ func (s *Store) UpsertBatch(ctx context.Context, entries []Entry) error {
 
 func (s *Store) upsertBatchOnce(ctx context.Context, entries []Entry) error {
 	return s.bun.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
-		now := time.Now().Unix()
+		return upsertBatchTx(ctx, tx, entries)
+	})
+}
 
-		dirSet := make(map[string]struct{}, len(entries))
+func upsertBatchTx(ctx context.Context, tx bun.Tx, entries []Entry) error {
+	now := time.Now().Unix()
+
+	dirSet := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		dirPath, _ := splitPath(entry.Path)
+		dirSet[dirPath] = struct{}{}
+	}
+
+	dirs := make([]*DirectoryModel, 0, len(dirSet))
+	paths := make([]string, 0, len(dirSet))
+	for path := range dirSet {
+		dirs = append(dirs, &DirectoryModel{Path: path})
+		paths = append(paths, path)
+	}
+
+	if len(dirs) > 0 {
+		if _, err := tx.NewInsert().
+			Model(&dirs).
+			On("CONFLICT (path) DO NOTHING").
+			Exec(ctx); err != nil {
+			return err
+		}
+	}
+
+	var directoryRows []DirectoryModel
+	if len(paths) > 0 {
+		if err := tx.NewSelect().
+			Model(&directoryRows).
+			Where("path IN (?)", bun.List(paths)).
+			Scan(ctx); err != nil {
+			return err
+		}
+	}
+
+	dirIDByPath := make(map[string]int64, len(directoryRows))
+	for _, row := range directoryRows {
+		dirIDByPath[row.Path] = row.ID
+	}
+
+	models := make([]*EntryModel, 0, len(entries))
+	for _, entry := range entries {
+		dirPath, baseName := splitPath(entry.Path)
+		dirID, ok := dirIDByPath[dirPath]
+		if !ok {
+			return fmt.Errorf("directory id not found for path %q", dirPath)
+		}
+
+		name := strings.TrimSpace(entry.Name)
+		if name == "" {
+			name = baseName
+		}
+		models = append(models, &EntryModel{
+			Name:      name,
+			DirID:     dirID,
+			Ext:       entry.Ext,
+			Size:      entry.Size,
+			MTime:     entry.MTime,
+			IsDir:     entry.IsDir,
+			Root:      entry.Root,
+			IndexedAt: now,
+		})
+	}
+
+	if len(models) == 0 {
+		return nil
+	}
+
+	_, err := tx.NewInsert().
+		Model(&models).
+		On("CONFLICT (dir_id, name) DO UPDATE").
+		Set("ext = EXCLUDED.ext").
+		Set("size = EXCLUDED.size").
+		Set("mtime = EXCLUDED.mtime").
+		Set("is_dir = EXCLUDED.is_dir").
+		Set("root = EXCLUDED.root").
+		Set("indexed_at = EXCLUDED.indexed_at").
+		Exec(ctx)
+	return err
+}
+
+func (s *Store) UpdateDirectorySizes(ctx context.Context, sizes map[string]int64) error {
+	cleanSizes := cleanDirectorySizes(sizes)
+	if len(cleanSizes) == 0 {
+		return nil
+	}
+	return s.bun.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		return updateDirectoryValuesTx(ctx, tx, "directory_size_updates", cleanSizes, false)
+	})
+}
+
+func (s *Store) UpsertBatchWithDirectorySizes(ctx context.Context, entries []Entry) error {
+	entries = dedupeEntries(entries)
+	if len(entries) == 0 {
+		return nil
+	}
+
+	return s.bun.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		deltas := make(map[string]int64)
 		for _, entry := range entries {
-			dirPath, _ := splitPath(entry.Path)
-			dirSet[dirPath] = struct{}{}
+			oldSize, oldIsDir, exists, err := lookupEntryStateTx(ctx, tx, entry.Path)
+			if err != nil {
+				return err
+			}
+			if exists && !oldIsDir {
+				addAncestorDelta(deltas, entry.Path, -oldSize)
+			}
+			if !entry.IsDir {
+				addAncestorDelta(deltas, entry.Path, entry.Size)
+			}
 		}
-
-		dirs := make([]*DirectoryModel, 0, len(dirSet))
-		paths := make([]string, 0, len(dirSet))
-		for path := range dirSet {
-			dirs = append(dirs, &DirectoryModel{Path: path})
-			paths = append(paths, path)
+		if err := upsertBatchTx(ctx, tx, entries); err != nil {
+			return err
 		}
+		return updateDirectoryValuesTx(ctx, tx, "directory_size_deltas", deltas, true)
+	})
+}
 
-		if len(dirs) > 0 {
-			if _, err := tx.NewInsert().
-				Model(&dirs).
-				On("CONFLICT (path) DO NOTHING").
-				Exec(ctx); err != nil {
+func (s *Store) DeleteByPathWithDirectorySize(ctx context.Context, path string) error {
+	return s.DeleteByPrefixWithDirectorySize(ctx, path)
+}
+
+func (s *Store) DeleteByPrefixWithDirectorySize(ctx context.Context, prefix string) error {
+	prefix = strings.TrimSpace(prefix)
+	if prefix == "" {
+		return nil
+	}
+	prefix = filepath.Clean(prefix)
+
+	return s.bun.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		total, err := sumFileSizesByPrefixTx(ctx, tx, prefix)
+		if err != nil {
+			return err
+		}
+		if err := deleteEntriesByPrefixes(ctx, tx, []string{prefix}); err != nil {
+			return err
+		}
+		if total != 0 {
+			deltas := make(map[string]int64)
+			addAncestorDeltaForDir(deltas, filepath.Dir(prefix), -total)
+			if err := updateDirectoryValuesTx(ctx, tx, "directory_size_deltas", deltas, true); err != nil {
 				return err
 			}
 		}
+		if err := pruneEmptyDirectoriesWith(ctx, tx); err != nil {
+			return err
+		}
+		return nil
+	})
+}
 
-		var directoryRows []DirectoryModel
-		if len(paths) > 0 {
-			if err := tx.NewSelect().
-				Model(&directoryRows).
-				Where("path IN (?)", bun.List(paths)).
-				Scan(ctx); err != nil {
-				return err
+func (s *Store) RecalculateDirectorySizes(ctx context.Context, roots []string) error {
+	roots = cleanPathList(roots)
+	if len(roots) == 0 {
+		return nil
+	}
+
+	return s.bun.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+		directories := make(map[string]int64)
+		for _, root := range roots {
+			for dir := filepath.Clean(root); ; {
+				exists, err := directoryEntryExistsTx(ctx, tx, dir)
+				if err != nil {
+					return err
+				}
+				if !exists {
+					break
+				}
+				directories[dir] = 0
+				parent := filepath.Dir(dir)
+				if parent == dir {
+					break
+				}
+				dir = parent
 			}
 		}
-
-		dirIDByPath := make(map[string]int64, len(directoryRows))
-		for _, row := range directoryRows {
-			dirIDByPath[row.Path] = row.ID
-		}
-
-		models := make([]*EntryModel, 0, len(entries))
-		for _, entry := range entries {
-			dirPath, baseName := splitPath(entry.Path)
-			dirID, ok := dirIDByPath[dirPath]
-			if !ok {
-				return fmt.Errorf("directory id not found for path %q", dirPath)
-			}
-
-			name := strings.TrimSpace(entry.Name)
-			if name == "" {
-				name = baseName
-			}
-			models = append(models, &EntryModel{
-				Name:      name,
-				DirID:     dirID,
-				Ext:       entry.Ext,
-				Size:      entry.Size,
-				MTime:     entry.MTime,
-				IsDir:     entry.IsDir,
-				Root:      entry.Root,
-				IndexedAt: now,
-			})
-		}
-
-		if len(models) == 0 {
+		if len(directories) == 0 {
 			return nil
 		}
 
-		_, err := tx.NewInsert().
-			Model(&models).
-			On("CONFLICT (dir_id, name) DO UPDATE").
-			Set("ext = EXCLUDED.ext").
-			Set("size = EXCLUDED.size").
-			Set("mtime = EXCLUDED.mtime").
-			Set("is_dir = EXCLUDED.is_dir").
-			Set("root = EXCLUDED.root").
-			Set("indexed_at = EXCLUDED.indexed_at").
-			Exec(ctx)
-		return err
+		clauses := make([]string, 0, len(directories))
+		args := []any{pathSeparator(), pathSeparator()}
+		for path := range directories {
+			prefix := pathPrefix(path)
+			clauses = append(clauses, `(i.full_path = ? OR substr(i.full_path, 1, length(?)) = ?)`)
+			args = append(args, path, prefix, prefix)
+		}
+		query := fullPathCTE() + `
+			SELECT i.full_path, e.size
+			FROM indexed_entries AS i
+			JOIN entries AS e ON e.id = i.id
+			WHERE e.is_dir = 0 AND (` + strings.Join(clauses, " OR ") + `)`
+		rows, err := tx.QueryContext(ctx, query, args...)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var path string
+			var size int64
+			if err := rows.Scan(&path, &size); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			for dir := range directories {
+				if isWithinPath(dir, path) {
+					directories[dir] += size
+				}
+			}
+		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+		return updateDirectoryValuesTx(ctx, tx, "directory_size_updates", directories, false)
 	})
+}
+
+type txExecutor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
+
+func updateDirectoryValuesTx(ctx context.Context, tx txExecutor, table string, values map[string]int64, delta bool) error {
+	if len(values) == 0 {
+		return nil
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE `+table+` (path TEXT PRIMARY KEY, value INTEGER NOT NULL)`); err != nil {
+		return err
+	}
+	defer func() { _, _ = tx.ExecContext(context.Background(), `DROP TABLE IF EXISTS `+table) }()
+
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO `+table+`(path, value) VALUES (?, ?) ON CONFLICT(path) DO UPDATE SET value = excluded.value`)
+	if err != nil {
+		return err
+	}
+	for path, value := range values {
+		path = filepath.Clean(strings.TrimSpace(path))
+		if path == "" || path == "." {
+			continue
+		}
+		if _, err := stmt.ExecContext(ctx, path, value); err != nil {
+			_ = stmt.Close()
+			return err
+		}
+	}
+	if err := stmt.Close(); err != nil {
+		return err
+	}
+
+	operator := "value"
+	if delta {
+		operator = "CASE WHEN entries.size + value < 0 THEN 0 ELSE entries.size + value END"
+	}
+	query := fullPathCTE() + `
+		UPDATE entries
+		SET size = (SELECT ` + operator + `
+			FROM ` + table + `
+			WHERE ` + table + `.path = (
+				SELECT indexed_entries.full_path
+				FROM indexed_entries
+				WHERE indexed_entries.id = entries.id
+			))
+		WHERE is_dir = 1
+		  AND id IN (
+			SELECT indexed_entries.id
+			FROM indexed_entries
+			JOIN ` + table + ` ON ` + table + `.path = indexed_entries.full_path
+		)`
+	_, err = tx.ExecContext(ctx, query, pathSeparator(), pathSeparator())
+	return err
+}
+
+func cleanDirectorySizes(sizes map[string]int64) map[string]int64 {
+	clean := make(map[string]int64, len(sizes))
+	for path, size := range sizes {
+		path = filepath.Clean(strings.TrimSpace(path))
+		if path == "" || path == "." {
+			continue
+		}
+		if size < 0 {
+			size = 0
+		}
+		clean[path] = size
+	}
+	return clean
+}
+
+func dedupeEntries(entries []Entry) []Entry {
+	byPath := make(map[string]Entry, len(entries))
+	order := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		path := filepath.Clean(entry.Path)
+		if _, ok := byPath[path]; !ok {
+			order = append(order, path)
+		}
+		entry.Path = path
+		byPath[path] = entry
+	}
+	out := make([]Entry, 0, len(order))
+	for _, path := range order {
+		out = append(out, byPath[path])
+	}
+	return out
+}
+
+func lookupEntryStateTx(ctx context.Context, tx txExecutor, path string) (size int64, isDir bool, exists bool, err error) {
+	dirPath, baseName := splitPath(path)
+	err = tx.QueryRowContext(ctx, `
+		SELECT e.size, e.is_dir
+		FROM entries AS e
+		JOIN directories AS d ON d.id = e.dir_id
+		WHERE d.path = ? AND e.name = ?`, dirPath, baseName).Scan(&size, &isDir)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, false, nil
+	}
+	return size, isDir, err == nil, err
+}
+
+func sumFileSizesByPrefixTx(ctx context.Context, tx txExecutor, prefix string) (int64, error) {
+	pathPrefixValue := pathPrefix(prefix)
+	query := fullPathCTE() + `
+		SELECT COALESCE(SUM(e.size), 0)
+		FROM indexed_entries AS i
+		JOIN entries AS e ON e.id = i.id
+		WHERE e.is_dir = 0
+		  AND (i.full_path = ? OR substr(i.full_path, 1, length(?)) = ?)`
+	var total int64
+	err := tx.QueryRowContext(ctx, query, pathSeparator(), pathSeparator(), prefix, pathPrefixValue, pathPrefixValue).Scan(&total)
+	return total, err
+}
+
+func directoryEntryExistsTx(ctx context.Context, tx txExecutor, path string) (bool, error) {
+	query := fullPathCTE() + `
+		SELECT EXISTS(
+			SELECT 1 FROM indexed_entries AS i
+			JOIN entries AS e ON e.id = i.id
+			WHERE e.is_dir = 1 AND i.full_path = ?
+		)`
+	var exists bool
+	err := tx.QueryRowContext(ctx, query, pathSeparator(), pathSeparator(), filepath.Clean(path)).Scan(&exists)
+	return exists, err
+}
+
+func addAncestorDelta(deltas map[string]int64, path string, delta int64) {
+	if delta == 0 {
+		return
+	}
+	addAncestorDeltaForDir(deltas, filepath.Dir(filepath.Clean(path)), delta)
+}
+
+func addAncestorDeltaForDir(deltas map[string]int64, dir string, delta int64) {
+	for dir = filepath.Clean(dir); ; {
+		deltas[dir] += delta
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return
+		}
+		dir = parent
+	}
+}
+
+func isWithinPath(root, path string) bool {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	if root == path {
+		return true
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." {
+		return false
+	}
+	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func isBusyError(err error) bool {

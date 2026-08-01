@@ -20,6 +20,10 @@ type Indexer interface {
 	UpsertBatch(ctx context.Context, entries []db.Entry) error
 }
 
+type DirectorySizeUpdater interface {
+	UpdateDirectorySizes(ctx context.Context, sizes map[string]int64) error
+}
+
 type Reconciler interface {
 	BeginScan(ctx context.Context, roots []string) (int64, error)
 	MarkSeenBatch(ctx context.Context, sessionID int64, entries []db.Entry) error
@@ -74,6 +78,78 @@ type scanProgress struct {
 	Protect     func(string)
 }
 
+type directorySizeAccumulator struct {
+	mu    sync.Mutex
+	sizes map[string]int64
+}
+
+func newDirectorySizeAccumulator() *directorySizeAccumulator {
+	return &directorySizeAccumulator{sizes: make(map[string]int64)}
+}
+
+func (a *directorySizeAccumulator) add(entry db.Entry) {
+	if a == nil {
+		return
+	}
+
+	root := filepath.Clean(strings.TrimSpace(entry.Root))
+	path := filepath.Clean(strings.TrimSpace(entry.Path))
+	if root == "." || path == "." || root == "" || path == "" {
+		return
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if entry.IsDir {
+		if _, ok := a.sizes[path]; !ok {
+			a.sizes[path] = 0
+		}
+		return
+	}
+
+	for dir := filepath.Dir(path); ; {
+		if !isWithinRoot(root, dir) {
+			return
+		}
+		a.sizes[dir] += entry.Size
+		if dir == root {
+			return
+		}
+		next := filepath.Dir(dir)
+		if next == dir {
+			return
+		}
+		dir = next
+	}
+}
+
+func (a *directorySizeAccumulator) snapshot() map[string]int64 {
+	if a == nil {
+		return nil
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	copySizes := make(map[string]int64, len(a.sizes))
+	for path, size := range a.sizes {
+		copySizes[path] = size
+	}
+	return copySizes
+}
+
+func isWithinRoot(root, path string) bool {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	if root == path {
+		return true
+	}
+	rel, err := filepath.Rel(root, path)
+	if err != nil || rel == ".." {
+		return false
+	}
+	prefix := ".." + string(filepath.Separator)
+	return !strings.HasPrefix(rel, prefix)
+}
+
 func DefaultWorkerCount() int {
 	w := runtime.NumCPU() * 2
 	if w < 4 {
@@ -126,6 +202,7 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 		indexed int64
 		skipped int64
 	)
+	sizes := newDirectorySizeAccumulator()
 	var currentPath atomic.Value
 	protected := make(map[string]struct{})
 	var protectedMu sync.Mutex
@@ -152,7 +229,6 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 		r.Progress(progress)
 	}
 
-	// Single writer goroutine: avoids concurrent SQLite writes (SQLITE_BUSY)
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
@@ -198,6 +274,7 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 	}()
 
 	emitEntry := func(entry db.Entry) error {
+		sizes.add(entry)
 		select {
 		case entriesCh <- entry:
 			return nil
@@ -243,7 +320,6 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 	if ctx.Err() != nil {
 		return Metrics{}, ctx.Err()
 	}
-
 	elapsed := time.Since(start)
 	metrics := Metrics{
 		Scanned: atomic.LoadInt64(&scanned),
@@ -272,6 +348,13 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 		}
 		sessionID = 0
 	}
+
+	if updater, ok := r.Indexer.(DirectorySizeUpdater); ok {
+		if err := updater.UpdateDirectorySizes(ctx, sizes.snapshot()); err != nil {
+			return Metrics{}, err
+		}
+	}
+
 	emitProgress()
 
 	return metrics, nil

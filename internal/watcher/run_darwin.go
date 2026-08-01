@@ -62,12 +62,12 @@ func (w *Watcher) Run(ctx context.Context, root string) error {
 
 				if evt.Flags&fsevents.ItemRemoved != 0 {
 					if evt.Flags&fsevents.ItemIsDir != 0 {
-						if err := w.store.DeleteByPrefix(ctx, path); err != nil {
+						if err := deleteWatchedPrefix(ctx, w.store, path); err != nil {
 							return err
 						}
 						continue
 					}
-					if err := w.store.DeleteByPath(ctx, path); err != nil {
+					if err := deleteWatchedPath(ctx, w.store, path); err != nil {
 						return err
 					}
 					continue
@@ -82,7 +82,7 @@ func (w *Watcher) Run(ctx context.Context, root string) error {
 				}
 			}
 
-			if err := w.store.UpsertBatch(ctx, upserts); err != nil {
+			if err := upsertWatchedEntries(ctx, w.store, upserts); err != nil {
 				return err
 			}
 		}

@@ -512,7 +512,7 @@ func (m model) searchMouseLayout() searchMouseLayout {
 	bodyW, _ := m.bodySize()
 	contentX := m.contentStartX()
 	contentY := m.contentStartY()
-	lineX := contentX + 2 // search card border + horizontal padding
+	lineX := contentX + 2
 
 	topRow, settingsOffset := m.searchTopRow(bodyW)
 	settingsButton := m.settingsButtonView()
@@ -520,9 +520,6 @@ func (m model) searchMouseLayout() searchMouseLayout {
 	start, end := m.searchVisibleRange()
 	resultW := max(searchColumnsWidth(m.searchTable.Columns()), m.searchTable.Width())
 
-	// These heights are derived from the same rendered fragments that viewSearch
-	// composes: card border/padding line, top row, search input box, "RESULTS",
-	// and the table header line produced by renderSearchResults.
 	firstResultY := contentY + 1 + lipgloss.Height(topRow) + lipgloss.Height(searchBox) + 2
 
 	return searchMouseLayout{
@@ -680,7 +677,6 @@ func (m model) mouseHoverMatches(kind mouseTargetKind, index int) bool {
 	return m.hoveredMouse.kind == kind && m.hoveredMouse.index == index
 }
 
-// noinspection GoAssignmentToReceiver
 func (m model) selectSearchResult(index int) model {
 	if index < 0 || index >= len(m.searchRes) {
 		return m
@@ -693,7 +689,6 @@ func (m model) selectSearchResult(index int) model {
 	return m
 }
 
-// noinspection GoAssignmentToReceiver
 func (m model) setSearchCursor(index int) model {
 	if len(m.searchRes) == 0 {
 		return m
@@ -705,7 +700,6 @@ func (m model) setSearchCursor(index int) model {
 	return m
 }
 
-// noinspection GoAssignmentToReceiver
 func (m model) openSelectedDeleteModal(index int) model {
 	if index < 0 || index >= len(m.searchRes) {
 		return m
@@ -762,7 +756,6 @@ func (m model) removeExcludeAt(index int) model {
 	return m
 }
 
-// noinspection GoAssignmentToReceiver
 func (m model) handleThemeOptionClick(index int) (model, tea.Cmd) {
 	if index < 0 || index >= len(m.themes) {
 		return m, nil
@@ -779,7 +772,6 @@ func (m model) handleThemeOptionClick(index int) (model, tea.Cmd) {
 	return m.closeModal(), nil
 }
 
-// noinspection GoAssignmentToReceiver
 func (m model) scrollSearchResults(delta int) model {
 	if len(m.searchRes) == 0 {
 		return m
@@ -809,7 +801,6 @@ func (m model) scrollModal(delta int) model {
 	return m
 }
 
-// noinspection GoAssignmentToReceiver
 func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	ev := tea.MouseEvent(msg)
 	target := m.resolveMouseTarget(ev.X, ev.Y)
@@ -918,7 +909,6 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// noinspection GoAssignmentToReceiver
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -1101,7 +1091,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// noinspection GoAssignmentToReceiver
 func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	m.searchInput.Focus()
 	switch msg.String() {
@@ -1132,14 +1121,14 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var cmd tea.Cmd
 	m.searchInput, cmd = m.searchInput.Update(msg)
+	m.searchInput = cleanMouseSequences(m.searchInput)
 	m.searchSeq++
 	q := m.searchInput.Value()
 	return m, tea.Batch(cmd, debounceCmd(m.searchSeq, q))
 }
 
-// noinspection GoAssignmentToReceiver
 func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	totalRows := 2 + len(m.cfg.Excludes) // 0 theme,1 delete mode,2.. excludes
+	totalRows := 2 + len(m.cfg.Excludes)
 	maxCursor := totalRows - 1
 	switch msg.String() {
 	case "j", "down":
@@ -1186,7 +1175,6 @@ func (m model) closeModal() model {
 	return m
 }
 
-// noinspection GoAssignmentToReceiver
 func (m model) handleThemeModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "j", "down":
@@ -1228,10 +1216,10 @@ func (m model) handleExcludeInputModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 	var cmd tea.Cmd
 	m.cfgInput, cmd = m.cfgInput.Update(msg)
+	m.cfgInput = cleanMouseSequences(m.cfgInput)
 	return m, cmd
 }
 
-// noinspection GoAssignmentToReceiver
 func (m model) handleDeleteConfirmModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "enter", "y":
@@ -1275,7 +1263,6 @@ func (m model) removeDeletedResult(entry db.Entry) model {
 	return m.syncSearchTableRows()
 }
 
-// noinspection GoAssignmentToReceiver
 func (m model) View() string {
 	m = m.resizeComponents()
 	return m.renderFrame()
@@ -1609,11 +1596,72 @@ func searchEntryValues(entry db.Entry) []string {
 	if entry.IsDir {
 		kind = "dir"
 	}
-	sizeText := "-"
-	if !entry.IsDir {
-		sizeText = fmt.Sprintf("%.1f KB", float64(entry.Size)/1024)
+	return []string{kind, entry.Name, filepath.Dir(entry.Path), formatBytes(entry.Size)}
+}
+
+func formatBytes(size int64) string {
+	if size < 0 {
+		size = 0
 	}
-	return []string{kind, entry.Name, filepath.Dir(entry.Path), sizeText}
+	const unit = 1024.0
+	value := float64(size)
+	units := []string{"B", "KB", "MB", "GB", "TB"}
+	index := 0
+	for value >= unit && index < len(units)-1 {
+		value /= unit
+		index++
+	}
+	if index == 0 {
+		return fmt.Sprintf("%d B", size)
+	}
+	return fmt.Sprintf("%.1f %s", value, units[index])
+}
+
+func cleanMouseSequences(input textinput.Model) textinput.Model {
+	value := input.Value()
+	cleaned := stripMouseSequences(value)
+	if cleaned == value {
+		return input
+	}
+	input.SetValue(cleaned)
+	input.CursorEnd()
+	return input
+}
+
+func stripMouseSequences(value string) string {
+	for {
+		start := strings.Index(value, "\x1b[<")
+		markerLength := 3
+		if start < 0 {
+			start = strings.Index(value, "[<")
+			markerLength = 2
+		}
+		if start < 0 {
+			break
+		}
+
+		relativeEnd := strings.IndexAny(value[start+markerLength:], "Mm")
+		if relativeEnd < 0 {
+			value = value[:start]
+			break
+		}
+		end := start + markerLength + relativeEnd + 1
+		value = value[:start] + value[end:]
+	}
+
+	for {
+		start := strings.Index(value, "\x1b[M")
+		if start < 0 {
+			break
+		}
+		end := start + 6
+		if end > len(value) {
+			value = value[:start]
+			break
+		}
+		value = value[:start] + value[end:]
+	}
+	return value
 }
 
 func searchColumnsWidth(cols []table.Column) int {
@@ -1879,7 +1927,6 @@ func deleteResultCmd(ctx context.Context, cfg config.Config, entry db.Entry, ind
 				return deleteResultDoneMsg{index: index, entry: entry, err: err}
 			}
 		case errors.Is(statErr, os.ErrNotExist):
-			// The file already disappeared; keep the index consistent below.
 		default:
 			return deleteResultDoneMsg{index: index, entry: entry, err: statErr}
 		}
@@ -1892,9 +1939,9 @@ func deleteResultCmd(ctx context.Context, cfg config.Config, entry db.Entry, ind
 		defer func() { _ = store.Close() }()
 
 		if isDir {
-			err = store.DeleteByPrefix(ctx, entry.Path)
+			err = store.DeleteByPrefixWithDirectorySize(ctx, entry.Path)
 		} else {
-			err = store.DeleteByPath(ctx, entry.Path)
+			err = store.DeleteByPathWithDirectorySize(ctx, entry.Path)
 		}
 		if err != nil {
 			return deleteResultDoneMsg{index: index, entry: entry, err: err}

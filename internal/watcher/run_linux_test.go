@@ -13,6 +13,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"goeverything/internal/db"
+	"goeverything/internal/scanner"
 )
 
 func TestLinuxWatcherIndexesCreatedFile(t *testing.T) {
@@ -120,4 +121,75 @@ func waitForWatch(t *testing.T, predicate func() bool) {
 		time.Sleep(50 * time.Millisecond)
 	}
 	t.Fatal("timed out waiting for watcher update")
+}
+
+func TestLinuxWatcherMaintainsDirectorySizes(t *testing.T) {
+	root := t.TempDir()
+	initial := filepath.Join(root, "initial.bin")
+	if err := os.WriteFile(initial, []byte("12"), 0o644); err != nil {
+		t.Fatalf("write initial file: %v", err)
+	}
+
+	store, err := db.Open(context.Background(), filepath.Join(t.TempDir(), "watcher-sizes.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+	if _, err := (scanner.Runner{Indexer: store, Backend: scanner.BackendWalk}).Scan(context.Background(), []string{root}); err != nil {
+		t.Fatalf("initial scan: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watchErr := make(chan error, 1)
+	go func() { watchErr <- New(store).Run(ctx, root) }()
+	time.Sleep(100 * time.Millisecond)
+
+	waitForDirectorySize(t, store, root, 2)
+	created := filepath.Join(root, "created.bin")
+	if err := os.WriteFile(created, []byte("1234567"), 0o644); err != nil {
+		t.Fatalf("write created file: %v", err)
+	}
+	waitForDirectorySize(t, store, root, 9)
+
+	if err := os.WriteFile(created, []byte("12345678901"), 0o644); err != nil {
+		t.Fatalf("modify created file: %v", err)
+	}
+	waitForDirectorySize(t, store, root, 13)
+
+	if err := os.Remove(created); err != nil {
+		t.Fatalf("remove created file: %v", err)
+	}
+	waitForDirectorySize(t, store, root, 2)
+
+	cancel()
+	select {
+	case err := <-watchErr:
+		if err != nil {
+			t.Fatalf("watcher: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("watcher did not stop after cancellation")
+	}
+}
+
+func waitForDirectorySize(t *testing.T, store *db.Store, path string, want int64) {
+	t.Helper()
+	deadline := time.Now().Add(4 * time.Second)
+	for time.Now().Before(deadline) {
+		results, err := store.SearchAdvanced(context.Background(), db.SearchOptions{
+			Query:    "*",
+			OnlyDirs: true,
+			Limit:    1000,
+		})
+		if err == nil {
+			for _, entry := range results {
+				if filepath.Clean(entry.Path) == filepath.Clean(path) && entry.Size == want {
+					return
+				}
+			}
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	t.Fatalf("directory %q did not reach size %d", path, want)
 }

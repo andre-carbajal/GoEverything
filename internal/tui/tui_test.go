@@ -61,6 +61,56 @@ func TestNewModelStartsInLocationPicker(t *testing.T) {
 	}
 }
 
+func TestFormatBytesIncludesDirectorySizes(t *testing.T) {
+	t.Parallel()
+
+	for size, want := range map[int64]string{
+		0:           "0 B",
+		512:         "512 B",
+		1024:        "1.0 KB",
+		1024 * 1024: "1.0 MB",
+	} {
+		if got := formatBytes(size); got != want {
+			t.Fatalf("formatBytes(%d): want %q, got %q", size, want, got)
+		}
+	}
+
+	values := searchEntryValues(db.Entry{
+		Name:  "empty",
+		Path:  "/tmp/empty",
+		IsDir: true,
+		Size:  0,
+	})
+	if values[0] != "dir" || values[3] != "0 B" {
+		t.Fatalf("unexpected directory row: %#v", values)
+	}
+}
+
+func TestMouseReportsAreNotInsertedIntoSearchInput(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(t, config.Config{
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
+	})
+	m.mode = viewSearch
+	m.searchInput.SetValue(".docker")
+	msg := tea.KeyMsg{
+		Type:  tea.KeyRunes,
+		Runes: []rune("\x1b[<65;34;31M\x1b[<65;35;31M"),
+	}
+
+	updated, _ := m.Update(msg)
+	next := updated.(model)
+	if next.searchInput.Value() != ".docker" {
+		t.Fatalf("mouse report polluted search input: %q", next.searchInput.Value())
+	}
+	if strings.Contains(next.searchInput.Value(), "65;34;31M") {
+		t.Fatalf("mouse report remained in search input: %q", next.searchInput.Value())
+	}
+}
+
 func TestSlashFromConfigDoesNotFocusSearch(t *testing.T) {
 	t.Parallel()
 

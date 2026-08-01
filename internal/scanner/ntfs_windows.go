@@ -148,6 +148,19 @@ func scanNTFSVolume(ctx context.Context, plan ntfsVolumePlan, emit func(db.Entry
 		return buildNTFSPath(plan.root, frn, records, pathByFRN, map[uint64]bool{})
 	}
 
+	for _, requestedRoot := range plan.paths {
+		info, statErr := os.Stat(requestedRoot)
+		if statErr != nil {
+			continue
+		}
+		progress.CurrentPath.Store(requestedRoot)
+		atomic.AddInt64(progress.Scanned, 1)
+		progress.Emit()
+		if err := emit(db.NewEntryFromPath(requestedRoot, requestedRoot, 0, info.ModTime(), true)); err != nil {
+			return err
+		}
+	}
+
 	for frn, record := range records {
 		select {
 		case <-ctx.Done():

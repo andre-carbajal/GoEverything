@@ -114,10 +114,7 @@ func (w *Watcher) applyWindowsNotifications(ctx context.Context, root string, bu
 
 		switch action {
 		case fileActionRemoved, fileActionRenamedOldName:
-			if err := w.store.DeleteByPath(ctx, path); err != nil {
-				return err
-			}
-			if err := w.store.DeleteByPrefix(ctx, path); err != nil {
+			if err := deleteWatchedPathAndDescendants(ctx, w.store, path); err != nil {
 				return err
 			}
 		case fileActionAdded, fileActionModified, fileActionRenamedNewName:
@@ -144,7 +141,7 @@ func upsertChangedPath(ctx context.Context, store IndexStore, root, path string)
 	}
 	entry := db.NewEntryFromPath(root, path, info.Size(), info.ModTime(), info.IsDir())
 	for attempt := 0; attempt < 3; attempt++ {
-		if err := store.UpsertBatch(ctx, []db.Entry{entry}); err == nil {
+		if err := upsertWatchedEntries(ctx, store, []db.Entry{entry}); err == nil {
 			return nil
 		}
 		select {
@@ -153,5 +150,5 @@ func upsertChangedPath(ctx context.Context, store IndexStore, root, path string)
 		case <-time.After(time.Duration(attempt+1) * 25 * time.Millisecond):
 		}
 	}
-	return store.UpsertBatch(ctx, []db.Entry{entry})
+	return upsertWatchedEntries(ctx, store, []db.Entry{entry})
 }
