@@ -87,6 +87,10 @@ type deleteResultDoneMsg struct {
 	err   error
 }
 
+type openDoneMsg struct {
+	err error
+}
+
 type hitbox struct {
 	x int
 	y int
@@ -928,6 +932,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.totalIndexed = msg.total
 		} else {
 			m.err = msg.err
+		}
+		return m, nil
+
+	case openDoneMsg:
+		if msg.err != nil {
+			m.err = msg.err
+			m.status = "open failed"
 		}
 		return m, nil
 
@@ -1971,10 +1982,38 @@ func (m model) startScanCmd(roots []string, label string, reindex bool) (model, 
 
 func openCmd(path string, reveal bool) tea.Cmd {
 	return func() tea.Msg {
+		return openDoneMsg{err: startOpenCommand(path, reveal)}
+	}
+}
+
+func startOpenCommand(path string, reveal bool) error {
+	if runtime.GOOS != "linux" {
 		cmd := openCommand(path, reveal)
-		_ = cmd.Start()
+		if err := cmd.Start(); err != nil {
+			return fmt.Errorf("start %s: %w", cmd.Args[0], err)
+		}
 		return nil
 	}
+
+	openPath := path
+	if reveal {
+		openPath = filepath.Dir(path)
+	}
+	commands := [][]string{
+		{"xdg-open", openPath},
+		{"gio", "open", openPath},
+		{"kde-open5", openPath},
+		{"kde-open", openPath},
+	}
+	for _, args := range commands {
+		if _, err := exec.LookPath(args[0]); err != nil {
+			continue
+		}
+		if err := exec.Command(args[0], args[1:]...).Start(); err == nil {
+			return nil
+		}
+	}
+	return errors.New("no desktop opener found; install xdg-utils or use gio/kde-open5")
 }
 
 func openCommand(path string, reveal bool) *exec.Cmd {

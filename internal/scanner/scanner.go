@@ -324,6 +324,7 @@ type walkBackend struct {
 }
 
 func (b walkBackend) Scan(ctx context.Context, roots []string, emit func(db.Entry) error, progress scanProgress) error {
+	mountFilter := newMountFilter(roots)
 	for _, root := range roots {
 		root := root
 		exclude := newExcludeMatcher(root, b.exclude)
@@ -341,6 +342,9 @@ func (b walkBackend) Scan(ctx context.Context, roots []string, emit func(db.Entr
 				return nil
 			}
 
+			if d.IsDir() && mountFilter != nil && mountFilter(root, path) {
+				return fastwalk.SkipDir
+			}
 			if exclude(path, d.IsDir()) {
 				if d.IsDir() {
 					return fastwalk.SkipDir
@@ -412,6 +416,9 @@ func newExcludeMatcher(root string, patterns []string) func(path string, isDir b
 			}
 
 			if filepath.Base(path) == pattern {
+				return true
+			}
+			if ok, _ := filepath.Match(pattern, filepath.Base(path)); ok {
 				return true
 			}
 		}

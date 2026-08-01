@@ -34,6 +34,19 @@ builds:
     goarch:
       - amd64
       - arm64
+  - id: ge-linux
+    main: ./cmd/ge
+    binary: ge
+    ldflags:
+      - -s -w
+      - -X goeverything/internal/app.Version={{ .Version }}
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+    goarch:
+      - amd64
+      - arm64
 
 archives:
   - id: darwin
@@ -54,6 +67,30 @@ archives:
       {{- .Version }}_
       {{- .Os }}_
       {{- .Arch }}
+  - id: linux
+    formats: [ tar.gz ]
+    ids:
+      - ge-linux
+    name_template: >-
+      {{ .ProjectName }}_
+      {{- .Version }}_
+      {{- .Os }}_
+      {{- .Arch }}
+
+nfpms:
+  - id: linux-packages
+    package_name: goeverything
+    ids:
+      - ge-linux
+    formats:
+      - deb
+      - rpm
+    bindir: /usr/bin
+    vendor: andre-carbajal
+    homepage: https://github.com/andre-carbajal/GoEverything
+    maintainer: andre-carbajal
+    description: Fast local file indexing and search
+    license: GPL v3
 
 checksum:
   name_template: checksums.txt
@@ -66,11 +103,14 @@ changelog:
       - "^test:"
       - "^ci:"
 
-brews:
+homebrew_casks:
   - name: goeverything
     ids:
       - darwin
-    directory: Formula
+    directory: Casks
+    binary: ge
+    conflicts:
+      - formula: goeverything
     repository:
       owner: andre-carbajal
       name: homebrew-tap
@@ -78,8 +118,6 @@ brews:
     homepage: https://github.com/andre-carbajal/GoEverything
     description: Fast local file indexing and search
     license: GPL v3
-    test: |
-      system "#{bin}/ge", "--help"
 
 scoops:
   - name: goeverything

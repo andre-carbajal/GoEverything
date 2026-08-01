@@ -15,6 +15,14 @@ func DefaultExcludes() []string {
 			"AppData/Local/Microsoft/Windows/INetCache/*",
 		)
 	}
+	if runtime.GOOS == "linux" {
+		return append(common,
+			".cache",
+			".local/share/Trash",
+			".Trash-*",
+			"lost+found",
+		)
+	}
 	return append(common,
 		".DS_Store",
 		"Library/Caches/*",

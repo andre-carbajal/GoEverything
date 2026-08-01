@@ -16,11 +16,12 @@ type IndexStore interface {
 }
 
 type Watcher struct {
-	store IndexStore
+	store   IndexStore
+	exclude []string
 }
 
-func New(store IndexStore) *Watcher {
-	return &Watcher{store: store}
+func New(store IndexStore, exclude ...string) *Watcher {
+	return &Watcher{store: store, exclude: append([]string(nil), exclude...)}
 }
 
 func WithPermissionHint(err error) error {
@@ -29,10 +30,14 @@ func WithPermissionHint(err error) error {
 	}
 	msg := strings.ToLower(err.Error())
 	if strings.Contains(msg, "operation not permitted") || strings.Contains(msg, "permission denied") {
-		if runtime.GOOS == "windows" {
+		switch runtime.GOOS {
+		case "windows":
 			return fmt.Errorf("%w\nhint: run the terminal as Administrator or scan a user-owned folder", err)
+		case "linux":
+			return fmt.Errorf("%w\nhint: check Unix permissions/ACLs, mount options, and scan a folder owned by the current user", err)
+		default:
+			return fmt.Errorf("%w\nhint: grant Full Disk Access to this terminal/app in System Settings > Privacy & Security > Full Disk Access", err)
 		}
-		return fmt.Errorf("%w\nhint: grant Full Disk Access to this terminal/app in System Settings > Privacy & Security > Full Disk Access", err)
 	}
 	return err
 }

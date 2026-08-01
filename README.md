@@ -1,9 +1,10 @@
 # GoEverything
 
-Fast local file indexing and search for macOS and Windows (Everything-style), built with Go.
+Fast local file indexing and search for macOS, Windows, and Linux (Everything-style), built with Go.
 
-> **Platform status:** GoEverything supports macOS and Windows. Windows scans use an NTFS metadata backend when
-> available and automatically fall back to a portable filesystem walk.
+> **Platform status:** GoEverything officially supports macOS, Windows, and Linux. Windows scans use an NTFS metadata
+> backend when available and automatically fall back to a portable filesystem walk. Linux uses a portable filesystem
+> walk and discovers accessible mounts while excluding virtual filesystems.
 
 ## What is GoEverything?
 
@@ -27,6 +28,15 @@ Use it when you want to:
 ```bash
 curl -fsSL https://raw.githubusercontent.com/andre-carbajal/GoEverything/main/scripts/install.sh | bash
 ```
+
+**Linux**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/andre-carbajal/GoEverything/main/scripts/install.sh | bash
+```
+
+Linux packages (`.deb` and `.rpm`) are also published with each release. The optional desktop actions use `xdg-open`
+or `gio`; moving files to the trash uses `gio` or `trash-put` from `trash-cli`.
 
 **Windows (PowerShell)**
 
@@ -53,7 +63,7 @@ ge --help
 
 ```bash
 brew tap andre-carbajal/tap
-brew install goeverything
+brew install --cask goeverything
 ```
 
 **Scoop**
@@ -151,7 +161,7 @@ ge search -q src --only-dirs
 # One-shot watch on a root
 ge watch --root "$HOME"
 
-# install/start persistent launchd watcher
+# install/start persistent user watcher
 ge watch install --root "$HOME"
 ge watch start
 ```
@@ -162,7 +172,8 @@ Windows supports foreground watch:
 ge watch --root $env:USERPROFILE
 ```
 
-Persistent `watch install/start/stop/status/logs` commands are currently macOS-only.
+macOS uses a LaunchAgent and Linux uses a `systemd --user` service for persistent watching. On Linux systems without a
+user systemd session, use the foreground watcher command instead. Windows supports foreground watch only.
 
 ### Rebuild search index (without rescanning)
 
@@ -217,6 +228,8 @@ Notes:
 
 - Some directories require extra platform permissions.
 - Start with folders you own (`$HOME`) and expand gradually.
+- On Linux, check Unix permissions, ACLs, and mount options when a directory is inaccessible. Virtual filesystems are
+  excluded automatically when scanning the system root.
 - On Windows, the NTFS backend may require an elevated terminal for full-volume scans. In `--backend auto` mode,
   GoEverything falls back to the portable walker if NTFS metadata access is unavailable.
 
@@ -241,7 +254,7 @@ ge scan --root "$HOME" --workers 16 --batch 3000
 - `--workers`: concurrent index workers
 - `--batch`: DB upsert batch size (default: 2000)
 - `--exclude`: skip names or root-relative globs
-- `--all-roots`: scan default platform roots (`/`, `/Volumes/*`, or Windows drive roots like `C:\`)
+- `--all-roots`: scan default platform roots (`/`, Linux data mounts, `/Volumes/*`, or Windows drive roots like `C:\`)
 
 Example:
 

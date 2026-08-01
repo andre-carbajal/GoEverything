@@ -28,6 +28,10 @@ func TestExcludeMatcher(t *testing.T) {
 	if matcher(filepath.Join(root, "Documents", "report.txt"), false) {
 		t.Fatalf("did not expect Documents/report.txt to be excluded")
 	}
+
+	if !newExcludeMatcher(root, []string{".Trash-*"})(filepath.Join(root, ".Trash-1000"), true) {
+		t.Fatalf("expected wildcard basename to be excluded")
+	}
 }
 
 func TestRunnerPrunesDeletedFileAfterRescan(t *testing.T) {

@@ -15,7 +15,7 @@ import (
 
 const launchdLabel = "com.ge.watch"
 
-func InstallLaunchAgent(executable, root, dbPath string) (string, error) {
+func InstallPersistentWatch(executable, root, dbPath string) (string, error) {
 	plistPath, err := launchAgentPath()
 	if err != nil {
 		return "", err
@@ -53,12 +53,12 @@ func InstallLaunchAgent(executable, root, dbPath string) (string, error) {
 	return plistPath, nil
 }
 
-func UninstallLaunchAgent() error {
+func UninstallPersistentWatch() error {
 	plistPath, err := launchAgentPath()
 	if err != nil {
 		return err
 	}
-	if err := StopLaunchAgent(); err != nil {
+	if err := StopPersistentWatch(); err != nil {
 		// ignore if not loaded
 	}
 	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
@@ -67,7 +67,7 @@ func UninstallLaunchAgent() error {
 	return nil
 }
 
-func StartLaunchAgent() error {
+func StartPersistentWatch() error {
 	uid, err := currentUID()
 	if err != nil {
 		return err
@@ -84,7 +84,7 @@ func StartLaunchAgent() error {
 	return nil
 }
 
-func StopLaunchAgent() error {
+func StopPersistentWatch() error {
 	uid, err := currentUID()
 	if err != nil {
 		return err
@@ -101,12 +101,12 @@ func StopLaunchAgent() error {
 	return nil
 }
 
-func RestartLaunchAgent() error {
-	_ = StopLaunchAgent()
-	return StartLaunchAgent()
+func RestartPersistentWatch() error {
+	_ = StopPersistentWatch()
+	return StartPersistentWatch()
 }
 
-func LaunchAgentStatus() (string, error) {
+func PersistentWatchStatus() (string, error) {
 	uid, err := currentUID()
 	if err != nil {
 		return "", err
@@ -119,7 +119,7 @@ func LaunchAgentStatus() (string, error) {
 	return string(out), nil
 }
 
-func LaunchAgentLogPaths() (stdout string, stderr string, err error) {
+func PersistentWatchLogPaths() (stdout string, stderr string, err error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", "", err

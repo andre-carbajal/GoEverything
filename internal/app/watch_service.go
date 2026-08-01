@@ -5,9 +5,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 
+	"goeverything/internal/config"
 	"goeverything/internal/watcher"
 )
 
@@ -24,11 +26,19 @@ func newWatchInstallCommand(opt *options) *cobra.Command {
 			if err != nil {
 				exe = filepath.Clean(exe)
 			}
-			plistPath, err := watcher.InstallLaunchAgent(exe, opt.Root, opt.DBPath)
+			root := opt.Root
+			if strings.TrimSpace(root) == "" {
+				root = "~"
+			}
+			root, err = config.ExpandPath(root)
 			if err != nil {
 				return err
 			}
-			fmt.Printf("installed %s\n", plistPath)
+			servicePath, err := watcher.InstallPersistentWatch(exe, root, opt.DBPath)
+			if err != nil {
+				return err
+			}
+			fmt.Printf("installed %s\n", servicePath)
 			return nil
 		},
 	}
@@ -39,7 +49,7 @@ func newWatchUninstallCommand() *cobra.Command {
 		Use:   "uninstall",
 		Short: "Uninstall persistent watch service",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := watcher.UninstallLaunchAgent(); err != nil {
+			if err := watcher.UninstallPersistentWatch(); err != nil {
 				return err
 			}
 			fmt.Println("watch service uninstalled")
@@ -53,7 +63,7 @@ func newWatchStartCommand() *cobra.Command {
 		Use:   "start",
 		Short: "Start persistent watch service",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := watcher.StartLaunchAgent(); err != nil {
+			if err := watcher.StartPersistentWatch(); err != nil {
 				return err
 			}
 			fmt.Println("watch service started")
@@ -67,7 +77,7 @@ func newWatchStopCommand() *cobra.Command {
 		Use:   "stop",
 		Short: "Stop persistent watch service",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := watcher.StopLaunchAgent(); err != nil {
+			if err := watcher.StopPersistentWatch(); err != nil {
 				return err
 			}
 			fmt.Println("watch service stopped")
@@ -81,7 +91,7 @@ func newWatchRestartCommand() *cobra.Command {
 		Use:   "restart",
 		Short: "Restart persistent watch service",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := watcher.RestartLaunchAgent(); err != nil {
+			if err := watcher.RestartPersistentWatch(); err != nil {
 				return err
 			}
 			fmt.Println("watch service restarted")
@@ -95,7 +105,7 @@ func newWatchStatusCommand() *cobra.Command {
 		Use:   "status",
 		Short: "Print persistent watch service status",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			status, err := watcher.LaunchAgentStatus()
+			status, err := watcher.PersistentWatchStatus()
 			if status != "" {
 				fmt.Println(status)
 			}
@@ -110,7 +120,7 @@ func newWatchLogsCommand() *cobra.Command {
 		Use:   "logs",
 		Short: "Show persistent watch log file paths (or tail logs with --follow)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			stdout, stderr, err := watcher.LaunchAgentLogPaths()
+			stdout, stderr, err := watcher.PersistentWatchLogPaths()
 			if err != nil {
 				return err
 			}
@@ -125,6 +135,6 @@ func newWatchLogsCommand() *cobra.Command {
 			return tail.Run()
 		},
 	}
-	command.Flags().BoolVar(&follow, "follow", false, "Tail launchd watch logs")
+	command.Flags().BoolVar(&follow, "follow", false, "Tail persistent watch logs")
 	return command
 }

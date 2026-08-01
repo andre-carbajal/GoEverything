@@ -1,29 +1,29 @@
-//go:build !darwin
+//go:build !darwin && !linux
 
 package watcher
 
 import "errors"
 
-func InstallLaunchAgent(_, _, _ string) (string, error) {
-	return "", errors.New("persistent watch service commands are only supported on macOS")
+func InstallPersistentWatch(_, _, _ string) (string, error) {
+	return "", errors.New("persistent watch service is not supported on Windows; use foreground watch")
 }
 
-func UninstallLaunchAgent() error {
-	return errors.New("persistent watch service commands are only supported on macOS")
+func UninstallPersistentWatch() error {
+	return errors.New("persistent watch service is not supported on Windows; use foreground watch")
 }
-func StartLaunchAgent() error {
-	return errors.New("persistent watch service commands are only supported on macOS")
+func StartPersistentWatch() error {
+	return errors.New("persistent watch service is not supported on Windows; use foreground watch")
 }
-func StopLaunchAgent() error {
-	return errors.New("persistent watch service commands are only supported on macOS")
+func StopPersistentWatch() error {
+	return errors.New("persistent watch service is not supported on Windows; use foreground watch")
 }
-func RestartLaunchAgent() error {
-	return errors.New("persistent watch service commands are only supported on macOS")
+func RestartPersistentWatch() error {
+	return errors.New("persistent watch service is not supported on Windows; use foreground watch")
 }
-func LaunchAgentStatus() (string, error) {
-	return "", errors.New("persistent watch service commands are only supported on macOS")
+func PersistentWatchStatus() (string, error) {
+	return "", errors.New("persistent watch service is not supported on Windows; use foreground watch")
 }
 
-func LaunchAgentLogPaths() (string, string, error) {
-	return "", "", errors.New("persistent watch service commands are only supported on macOS")
+func PersistentWatchLogPaths() (string, string, error) {
+	return "", "", errors.New("persistent watch service is not supported on Windows; use foreground watch")
 }

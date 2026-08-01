@@ -134,6 +134,9 @@ func newScanCommand(opt *options, cfg *config.Config) *cobra.Command {
 				}
 				resolvedRoots = append(resolvedRoots, resolved)
 			}
+			if opt.Roots {
+				resolvedRoots = scanner.DeduplicateRoots(resolvedRoots)
+			}
 
 			r := scanner.Runner{
 				Indexer: store,
@@ -272,7 +275,7 @@ func newWatchCommand(opt *options, cfg *config.Config) *cobra.Command {
 				return err
 			}
 
-			w := watcher.New(store)
+			w := watcher.New(store, opt.Exclude...)
 			if err := w.Run(cmd.Context(), root); err != nil {
 				return watcher.WithPermissionHint(err)
 			}

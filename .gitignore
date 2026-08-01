@@ -1,6 +1,8 @@
 goeverything.db
 build/
 bin/
+dist/
+/ge
 *.exe
 *.exe~
 *.dll
