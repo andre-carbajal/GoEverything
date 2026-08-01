@@ -63,7 +63,11 @@ func NewRootCommand() *cobra.Command {
 
 			if opt.DBPath == "" {
 				if cfg.DBPath != "" {
-					opt.DBPath = cfg.DBPath
+					resolved, resolveErr := config.ExpandPath(cfg.DBPath)
+					if resolveErr != nil {
+						return resolveErr
+					}
+					opt.DBPath = resolved
 				} else {
 					dbPath, dbErr := config.Path()
 					if dbErr != nil {
@@ -85,7 +89,7 @@ func NewRootCommand() *cobra.Command {
 				}
 			}
 			if err := os.MkdirAll(filepath.Dir(opt.DBPath), 0o755); err != nil {
-				return fmt.Errorf("cannot create db dir %q: %w\nhint: ensure ~/.config/ge is writable or pass --db", filepath.Dir(opt.DBPath), err)
+				return fmt.Errorf("cannot create db dir %q: %w\nhint: ensure the configured data directory is writable or pass --db", filepath.Dir(opt.DBPath), err)
 			}
 			cfg.DBPath = opt.DBPath
 			cfg.Excludes = opt.Exclude
@@ -120,7 +124,7 @@ func newScanCommand(opt *options, cfg *config.Config) *cobra.Command {
 			if opt.Roots {
 				roots = scanner.DiscoverRoots()
 			} else if strings.TrimSpace(opt.Root) == "" {
-				roots = []string{cfg.DefaultScanPath}
+				roots = []string{"~"}
 			}
 			resolvedRoots := make([]string, 0, len(roots))
 			for _, root := range roots {
@@ -156,7 +160,7 @@ func newScanCommand(opt *options, cfg *config.Config) *cobra.Command {
 			return nil
 		},
 	}
-	command.Flags().StringVar(&opt.Root, "root", "", "Filesystem root to scan (default: roots from config)")
+	command.Flags().StringVar(&opt.Root, "root", "", "Filesystem root to scan (default: home directory)")
 	command.Flags().BoolVar(&opt.Roots, "all-roots", false, "Scan default platform roots")
 	command.Flags().IntVar(&opt.Workers, "workers", scanner.DefaultWorkerCount(), "Concurrent index workers")
 	command.Flags().IntVar(&opt.Batch, "batch", 2000, "Batch size for DB upserts")
@@ -261,7 +265,7 @@ func newWatchCommand(opt *options, cfg *config.Config) *cobra.Command {
 
 			root := strings.TrimSpace(opt.Root)
 			if root == "" {
-				root = cfg.DefaultScanPath
+				root = "~"
 			}
 			root, err = config.ExpandPath(root)
 			if err != nil {
@@ -275,7 +279,7 @@ func newWatchCommand(opt *options, cfg *config.Config) *cobra.Command {
 			return nil
 		},
 	}
-	command.PersistentFlags().StringVar(&opt.Root, "root", "", "Filesystem root to watch (default: root from config)")
+	command.PersistentFlags().StringVar(&opt.Root, "root", "", "Filesystem root to watch (default: home directory)")
 
 	command.AddCommand(newWatchInstallCommand(opt))
 	command.AddCommand(newWatchUninstallCommand())

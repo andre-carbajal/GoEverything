@@ -3,6 +3,7 @@
 package scanner
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"unicode/utf16"
@@ -33,7 +34,7 @@ func DiscoverRoots() []string {
 		if i > start {
 			root := string(utf16.Decode(buf[start:i]))
 			rootType := windows.GetDriveType(windows.StringToUTF16Ptr(root))
-			if rootType == windows.DRIVE_FIXED || rootType == windows.DRIVE_REMOVABLE {
+			if rootType == windows.DRIVE_FIXED || rootType == windows.DRIVE_REMOVABLE || rootType == windows.DRIVE_REMOTE {
 				roots = append(roots, strings.ToUpper(root[:1])+root[1:])
 			}
 		}
@@ -43,5 +44,19 @@ func DiscoverRoots() []string {
 		return []string{`C:\`}
 	}
 	sort.Strings(roots)
+	return roots
+}
+
+func logicalDriveRoots(mask uint32, accessible func(string) bool) []string {
+	roots := make([]string, 0, 26)
+	for i := 0; i < 26; i++ {
+		if mask&(1<<i) == 0 {
+			continue
+		}
+		root := fmt.Sprintf("%c:\\", 'A'+rune(i))
+		if accessible == nil || accessible(root) {
+			roots = append(roots, root)
+		}
+	}
 	return roots
 }

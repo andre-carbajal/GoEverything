@@ -3,5 +3,5 @@
 package scanner
 
 func DiscoverRoots() []string {
-	return []string{"/"}
+	return sortRoots([]string{"~", "/"})
 }

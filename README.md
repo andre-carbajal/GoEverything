@@ -73,12 +73,16 @@ scoop install andre-carbajal/goeverything
 ge
 ```
 
-The TUI scans your configured location first, then opens the search screen.
-If the startup scan fails or is canceled, it opens settings so you can adjust the scan location or excludes.
+The TUI opens a location picker first. The input is focused immediately: choose Home, System, a mounted volume/drive, or
+type a folder path. Suggestions are completed one directory level at a time. After confirming, the selected location is
+scanned and the progress panel is shown before search opens. The selected location is not persisted. If the scan fails
+or is canceled, the picker is shown again.
 
 Useful shortcuts:
 
 - `↑` / `↓` move through search results
+- In the location picker, `↑` / `↓` select suggestions and `Tab` / `→` accept completion
+- In the location picker, `Enter` scans the selected root/path and `Esc` cancels
 - `Enter` open selected result
 - `Ctrl+D` / `Delete` remove selected result
 - Click select, double-click open, right-click delete
@@ -170,21 +174,19 @@ ge reindex
 
 ## Configuration
 
-Default paths:
+Portable data paths:
 
-- macOS/Linux config: `~/.config/ge/config.json`
-- macOS/Linux database: `~/.config/ge/goeverything.db`
-- Windows config: `%LOCALAPPDATA%\ge\config.json`
-- Windows database: `%LOCALAPPDATA%\ge\goeverything.db`
+- Config and database are stored below `os.UserConfigDir()/ge` for the current platform.
+- Existing legacy files under `~/.config/ge` (and the previous Windows locations) are migrated on load.
 
 Example `~/.config/ge/config.json`:
 
 ```json
 {
   "db_path": "~/.config/ge/goeverything.db",
-  "default_scan_path": "~",
   "theme": "tokyonight",
   "delete_mode": "trash",
+  "last_search": "report",
   "excludes": [
     ".git",
     "node_modules",
@@ -196,7 +198,8 @@ Example `~/.config/ge/config.json`:
 Notes:
 
 - `db_path`: SQLite database location
-- `default_scan_path`: default root when you do not pass `--root`
+- Scan location: selected per TUI execution and never persisted as a default
+- `last_search`: last non-empty TUI query, displayed as the next search suggestion
 - `delete_mode`: `trash` or `permanent` for deletes from the TUI
 - `excludes`: ignore names or root-relative glob patterns
 

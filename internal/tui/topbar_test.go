@@ -11,10 +11,9 @@ import (
 func TestTopBarShowsScanDuration(t *testing.T) {
 	t.Parallel()
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.lastMetrics.Elapsed = 2 * time.Second
 	out := m.renderTopBar()

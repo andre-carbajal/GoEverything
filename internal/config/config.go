@@ -3,10 +3,8 @@ package config
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 
 	"goeverything/internal/scanner"
@@ -21,19 +19,23 @@ const (
 )
 
 type Config struct {
-	DBPath          string   `json:"db_path"`
-	DefaultScanPath string   `json:"default_scan_path"`
-	Excludes        []string `json:"excludes"`
-	Theme           string   `json:"theme"`
-	DeleteMode      string   `json:"delete_mode"`
+	DBPath     string   `json:"db_path"`
+	Excludes   []string `json:"excludes"`
+	Theme      string   `json:"theme"`
+	DeleteMode string   `json:"delete_mode"`
+	LastSearch string   `json:"last_search,omitempty"`
 }
 
 type legacyConfig struct {
 	DBPath          string   `json:"db_path"`
+	DefaultScanPath string   `json:"default_scan_path"`
+	AutoScanOnStart bool     `json:"auto_scan_on_start"`
 	Roots           []string `json:"roots"`
 	Excludes        []string `json:"excludes"`
 	Theme           string   `json:"theme"`
 	DefaultScanMode string   `json:"default_scan_mode"`
+	DeleteMode      string   `json:"delete_mode"`
+	LastSearch      string   `json:"last_search"`
 }
 
 func Load() (Config, error) {
@@ -41,13 +43,25 @@ func Load() (Config, error) {
 	if err != nil {
 		return Config{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return Config{}, fmt.Errorf("cannot create config dir %q: %w", filepath.Dir(path), err)
-	}
 
 	cfg := defaults()
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			for _, candidate := range legacyPaths() {
+				if candidate == path {
+					continue
+				}
+				data, err = os.ReadFile(candidate)
+				if err == nil {
+					// The legacy file is migrated into the portable location below.
+					break
+				}
+				if !errors.Is(err, os.ErrNotExist) {
+					return Config{}, err
+				}
+			}
+		}
 		if errors.Is(err, os.ErrNotExist) {
 			if saveErr := Save(cfg); saveErr != nil {
 				return Config{}, saveErr
@@ -103,29 +117,46 @@ func Path() (string, error) {
 }
 
 func Dir() (string, error) {
-	if runtime.GOOS == "windows" {
-		if dir := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); dir != "" {
-			return filepath.Join(dir, "ge"), nil
-		}
-		if profile := strings.TrimSpace(os.Getenv("USERPROFILE")); profile != "" {
-			return filepath.Join(profile, ".config", "ge"), nil
-		}
-	}
-	home, err := os.UserHomeDir()
+	base, err := os.UserConfigDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "ge"), nil
+	return filepath.Join(base, "ge"), nil
+}
+
+func legacyPaths() []string {
+	paths := make([]string, 0, 3)
+	add := func(base string) {
+		if strings.TrimSpace(base) == "" {
+			return
+		}
+		candidate := filepath.Join(base, "config.json")
+		for _, existing := range paths {
+			if existing == candidate {
+				return
+			}
+		}
+		paths = append(paths, candidate)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, ".config", "ge"))
+	}
+	if base := strings.TrimSpace(os.Getenv("LOCALAPPDATA")); base != "" {
+		add(filepath.Join(base, "ge"))
+	}
+	if base := strings.TrimSpace(os.Getenv("USERPROFILE")); base != "" {
+		add(filepath.Join(base, ".config", "ge"))
+	}
+	return paths
 }
 
 func defaults() Config {
 	dbPath, _ := defaultDBPath()
 	return Config{
-		DBPath:          dbPath,
-		DefaultScanPath: homeToken,
-		Excludes:        scanner.DefaultExcludes(),
-		Theme:           defaultTheme,
-		DeleteMode:      DeleteModeTrash,
+		DBPath:     dbPath,
+		Excludes:   scanner.DefaultExcludes(),
+		Theme:      defaultTheme,
+		DeleteMode: DeleteModeTrash,
 	}
 }
 
@@ -139,18 +170,11 @@ func defaultDBPath() (string, error) {
 
 func fromLegacy(old legacyConfig) Config {
 	cfg := Config{
-		DBPath:          old.DBPath,
-		Excludes:        old.Excludes,
-		Theme:           old.Theme,
-		DeleteMode:      DeleteModeTrash,
-		DefaultScanPath: homeToken,
-	}
-	if len(old.Roots) > 0 {
-		cfg.DefaultScanPath = old.Roots[0]
-	}
-	mode := strings.ToLower(strings.TrimSpace(old.DefaultScanMode))
-	if mode == "home" {
-		cfg.DefaultScanPath = homeToken
+		DBPath:     old.DBPath,
+		Excludes:   old.Excludes,
+		Theme:      old.Theme,
+		DeleteMode: old.DeleteMode,
+		LastSearch: old.LastSearch,
 	}
 	return cfg
 }
@@ -161,9 +185,6 @@ func (c *Config) normalize() {
 		if err == nil {
 			c.DBPath = dbPath
 		}
-	}
-	if strings.TrimSpace(c.DefaultScanPath) == "" {
-		c.DefaultScanPath = homeToken
 	}
 	if len(c.Excludes) == 0 {
 		c.Excludes = scanner.DefaultExcludes()

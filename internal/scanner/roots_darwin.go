@@ -5,12 +5,12 @@ package scanner
 import (
 	"os"
 	"path/filepath"
-	"sort"
 )
 
 func DiscoverRoots() []string {
 	roots := map[string]struct{}{
 		"/": {},
+		"~": {},
 	}
 
 	entries, err := os.ReadDir("/Volumes")
@@ -27,6 +27,5 @@ func DiscoverRoots() []string {
 	for root := range roots {
 		result = append(result, root)
 	}
-	sort.Strings(result)
-	return result
+	return sortRoots(result)
 }

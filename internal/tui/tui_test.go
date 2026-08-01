@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -28,10 +29,9 @@ func TestSearchSettingsShortcutOpensConfig(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 
@@ -42,20 +42,22 @@ func TestSearchSettingsShortcutOpensConfig(t *testing.T) {
 	}
 }
 
-func TestNewModelStartsInStartupView(t *testing.T) {
+func TestNewModelStartsInLocationPicker(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
-	if m.mode != viewStartup {
-		t.Fatalf("expected initial mode startup, got %v", m.mode)
+	if m.mode != viewLocation {
+		t.Fatalf("expected initial mode location picker, got %v", m.mode)
 	}
-	if m.status != "preparing initial scan" {
-		t.Fatalf("expected startup scan status, got %q", m.status)
+	if !m.locationInput.Focused() {
+		t.Fatalf("expected location input to be focused")
+	}
+	if m.status != "choose a location to scan" {
+		t.Fatalf("expected location picker status, got %q", m.status)
 	}
 }
 
@@ -63,10 +65,9 @@ func TestSlashFromConfigDoesNotFocusSearch(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewConfig
 
@@ -81,10 +82,9 @@ func TestSearchInputAllowsTypingJKWhenInputFocused(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{{Name: "a", Path: "/tmp/a"}}
@@ -100,10 +100,9 @@ func TestSearchInputAllowsTypingTestWithoutOpeningSettings(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 
@@ -124,10 +123,9 @@ func TestSearchInputAllowsTypingDWhenInputFocused(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{{Name: "delete-me.txt", Path: "/tmp/delete-me.txt"}}
@@ -146,10 +144,9 @@ func TestSearchInputAllowsTypingSlash(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 
@@ -164,10 +161,9 @@ func TestSearchTabDoesNotSwitchFocus(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 	m.searchInput.SetValue("a")
@@ -182,7 +178,7 @@ func TestSearchTabDoesNotSwitchFocus(t *testing.T) {
 	if next.searchInput.Value() != "a" {
 		t.Fatalf("expected tab to leave input value unchanged, got %q", next.searchInput.Value())
 	}
-	if next.searchCur != 0 || next.searchTable.Cursor() != 0 {
+	if next.searchCur != 0 || next.searchTable.Cursor() > 0 {
 		t.Fatalf("expected tab to leave selection unchanged, searchCur=%d tableCursor=%d", next.searchCur, next.searchTable.Cursor())
 	}
 	if next.searchSeq != 7 {
@@ -194,10 +190,9 @@ func TestSearchInputArrowDownNavigatesResults(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 	m.searchInput.SetValue("a")
@@ -220,10 +215,9 @@ func TestSearchInputArrowUpNavigatesResults(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 	m.searchInput.SetValue("b")
@@ -236,7 +230,7 @@ func TestSearchInputArrowUpNavigatesResults(t *testing.T) {
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyUp})
 	next := updated.(model)
-	if next.searchCur != 0 || next.searchTable.Cursor() != 0 {
+	if next.searchCur != 0 || next.searchTable.Cursor() > 0 {
 		t.Fatalf("expected cursor to move to 0, searchCur=%d tableCursor=%d", next.searchCur, next.searchTable.Cursor())
 	}
 	if next.searchInput.Value() != "b" {
@@ -248,10 +242,9 @@ func TestSearchInputArrowDownWithoutResultsKeepsInput(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 	m.searchInput.SetValue("missing")
@@ -261,7 +254,7 @@ func TestSearchInputArrowDownWithoutResultsKeepsInput(t *testing.T) {
 	if next.searchInput.Value() != "missing" {
 		t.Fatalf("expected input value to stay unchanged, got %q", next.searchInput.Value())
 	}
-	if next.searchCur != 0 || next.searchTable.Cursor() != 0 {
+	if next.searchCur != 0 || next.searchTable.Cursor() > 0 {
 		t.Fatalf("expected cursor to stay at 0, searchCur=%d tableCursor=%d", next.searchCur, next.searchTable.Cursor())
 	}
 }
@@ -270,10 +263,9 @@ func TestSearchInputEnterOpensArrowSelectedResult(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{
@@ -298,10 +290,9 @@ func TestSearchResultSelectionRendersFullRowWidth(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{
@@ -335,11 +326,10 @@ func TestSearchCtrlDOpensDeleteConfirmationAndCancelKeepsResults(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
-		DeleteMode:      config.DeleteModeTrash,
+		DBPath:     "/tmp/test.db",
+		Excludes:   []string{".git"},
+		Theme:      "tokyonight",
+		DeleteMode: config.DeleteModeTrash,
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{{Name: "delete-me.txt", Path: "/tmp/delete-me.txt"}}
@@ -370,11 +360,10 @@ func TestSearchDeleteKeyOpensDeleteConfirmation(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
-		DeleteMode:      config.DeleteModeTrash,
+		DBPath:     "/tmp/test.db",
+		Excludes:   []string{".git"},
+		Theme:      "tokyonight",
+		DeleteMode: config.DeleteModeTrash,
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{{Name: "delete-me.txt", Path: "/tmp/delete-me.txt"}}
@@ -391,11 +380,10 @@ func TestDeleteConfirmationEnterStartsDeleteCommand(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
-		DeleteMode:      config.DeleteModePermanent,
+		DBPath:     "/tmp/test.db",
+		Excludes:   []string{".git"},
+		Theme:      "tokyonight",
+		DeleteMode: config.DeleteModePermanent,
 	})
 	m.mode = viewSearch
 	m.modal = deleteConfirmModal
@@ -417,11 +405,10 @@ func TestDeleteResultSuccessRemovesResultAndClampsCursor(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
-		DeleteMode:      config.DeleteModePermanent,
+		DBPath:     "/tmp/test.db",
+		Excludes:   []string{".git"},
+		Theme:      "tokyonight",
+		DeleteMode: config.DeleteModePermanent,
 	})
 	m.mode = viewSearch
 	deleted := db.Entry{Name: "folder", Path: "/tmp/folder", IsDir: true}
@@ -447,14 +434,13 @@ func TestDeleteResultSuccessRemovesResultAndClampsCursor(t *testing.T) {
 	}
 }
 
-func TestCountDoneAlwaysStartsInitialScanFromDefaultPath(t *testing.T) {
+func TestCountDoneDoesNotStartScanAutomatically(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 
 	updated, cmd := m.Update(countDoneMsg{total: 7})
@@ -463,14 +449,11 @@ func TestCountDoneAlwaysStartsInitialScanFromDefaultPath(t *testing.T) {
 	if next.totalIndexed != 7 {
 		t.Fatalf("expected indexed count updated, got %d", next.totalIndexed)
 	}
-	if !next.startupScanAttempted {
-		t.Fatalf("expected startup scan to be attempted")
+	if next.startupScanAttempted || next.busy {
+		t.Fatalf("count refresh must not trigger a scan")
 	}
-	if !next.busy {
-		t.Fatalf("expected model to be busy while startup scan runs")
-	}
-	if cmd == nil {
-		t.Fatalf("expected startup scan command")
+	if cmd != nil {
+		t.Fatalf("did not expect a startup scan command")
 	}
 }
 
@@ -478,10 +461,9 @@ func TestStartupViewShowsProgressByDefault(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewStartup
 	m.busy = true
@@ -504,10 +486,9 @@ func TestStartupSpaceDoesNotHideProgress(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewStartup
 	m.busy = true
@@ -547,10 +528,9 @@ func TestStartupCtrlXCancelsAndOnlyCtrlQQuits(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewStartup
 	m.busy = true
@@ -585,10 +565,9 @@ func TestScanProgressTickUpdatesStartupProgress(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewStartup
 	m.busy = true
@@ -620,10 +599,9 @@ func TestInitialScanSuccessOpensSearch(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewStartup
 	m.busy = true
@@ -646,10 +624,9 @@ func TestInitialScanFailureOpensConfig(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewStartup
 	m.busy = true
@@ -657,8 +634,8 @@ func TestInitialScanFailureOpensConfig(t *testing.T) {
 	updated, cmd := m.Update(scanDoneMsg{label: "initial-scan", err: errors.New("permission denied")})
 	next := updated.(model)
 
-	if next.mode != viewConfig {
-		t.Fatalf("expected config mode after failed startup scan, got %v", next.mode)
+	if next.mode != viewLocation {
+		t.Fatalf("expected location picker after failed startup scan, got %v", next.mode)
 	}
 	if next.err == nil || !strings.Contains(next.err.Error(), "permission denied") {
 		t.Fatalf("expected startup scan error to be preserved, got %v", next.err)
@@ -672,10 +649,9 @@ func TestManualScanSuccessReturnsToSearch(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewStartup
 	m.busy = true
@@ -695,35 +671,34 @@ func TestManualScanSuccessReturnsToSearch(t *testing.T) {
 	}
 }
 
-func TestCtrlGSwitchesToScanModal(t *testing.T) {
+func TestCtrlGOpensLocationPicker(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyCtrlG})
 	next := updated.(model)
 
-	if next.mode != viewStartup {
-		t.Fatalf("expected ctrl+g to switch to scan modal, got %v", next.mode)
+	if next.mode != viewLocation {
+		t.Fatalf("expected ctrl+g to open location picker, got %v", next.mode)
 	}
-	if !next.busy {
-		t.Fatalf("expected ctrl+g to start scan")
+	if next.busy {
+		t.Fatalf("ctrl+g must wait for location confirmation")
 	}
-	if next.activeScanLabel != "manual-scan" {
-		t.Fatalf("expected manual scan label, got %q", next.activeScanLabel)
+	if next.locationScanLabel != "manual-scan" {
+		t.Fatalf("expected manual scan label, got %q", next.locationScanLabel)
 	}
-	if cmd == nil {
-		t.Fatalf("expected scan command")
+	if cmd != nil {
+		t.Fatalf("did not expect a scan command before confirmation")
 	}
 	out := next.View()
-	if !strings.Contains(out, "Scanning index") {
-		t.Fatalf("expected manual scan modal message, got:\n%s", out)
+	if !strings.Contains(out, "SELECT LOCATION TO SCAN") {
+		t.Fatalf("expected location picker, got:\n%s", out)
 	}
 }
 
@@ -731,10 +706,9 @@ func TestEscFromConfigReturnsToSearch(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewConfig
 
@@ -790,11 +764,10 @@ func renderedHelpLine(t *testing.T, m model) int {
 func modelWithManySearchRows(t testing.TB) model {
 	t.Helper()
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
-		DeleteMode:      config.DeleteModeTrash,
+		DBPath:     "/tmp/test.db",
+		Excludes:   []string{".git"},
+		Theme:      "tokyonight",
+		DeleteMode: config.DeleteModeTrash,
 	})
 	m.mode = viewSearch
 	m.searchRes = make([]db.Entry, 24)
@@ -814,10 +787,9 @@ func TestMouseHoverTracksInteractiveTargetsWithoutActivating(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git", "node_modules"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git", "node_modules"},
+		Theme:    "tokyonight",
 	}
 
 	m := newTestModel(t, cfg)
@@ -908,15 +880,14 @@ func TestMouseLeftClickActivatesConfigRows(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewConfig
-	updated, _ := m.Update(mouseEventIn(m.configRowHitbox(1), tea.MouseActionPress, tea.MouseButtonLeft))
+	updated, _ := m.Update(mouseEventIn(m.configRowHitbox(0), tea.MouseActionPress, tea.MouseButtonLeft))
 	next := updated.(model)
-	if next.modal != themeModal || next.cfgCursor != 1 {
+	if next.modal != themeModal || next.cfgCursor != 0 {
 		t.Fatalf("expected theme row click to open theme modal, modal=%v cursor=%d", next.modal, next.cfgCursor)
 	}
 }
@@ -925,10 +896,9 @@ func TestSearchSettingsMouseClickOpensConfig(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
@@ -952,11 +922,10 @@ func TestSearchResultMouseClickDoubleClickAndRightClick(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
-		DeleteMode:      config.DeleteModeTrash,
+		DBPath:     "/tmp/test.db",
+		Excludes:   []string{".git"},
+		Theme:      "tokyonight",
+		DeleteMode: config.DeleteModeTrash,
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{
@@ -991,11 +960,10 @@ func TestSearchResultRightReleaseOpensDeleteConfirmation(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
-		DeleteMode:      config.DeleteModeTrash,
+		DBPath:     "/tmp/test.db",
+		Excludes:   []string{".git"},
+		Theme:      "tokyonight",
+		DeleteMode: config.DeleteModeTrash,
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{
@@ -1015,10 +983,9 @@ func TestMouseWheelMovesSearchConfigAndModalCursors(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git", "node_modules"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git", "node_modules"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 	m.searchRes = []db.Entry{
@@ -1057,10 +1024,9 @@ func TestConfigViewRendersOnNarrowTerminal(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~/Projects/Very/Long/Path/For/Testing/Responsiveness",
-		Excludes:        []string{".git", "Library/Caches/*"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git", "Library/Caches/*"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewConfig
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 72, Height: 30})
@@ -1082,10 +1048,9 @@ func TestTopBarAndConfigViewUseFullWideTerminalWidth(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git", "node_modules"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git", "node_modules"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewConfig
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
@@ -1108,10 +1073,9 @@ func TestConfigHitboxesUseFullWideTerminalLayout(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git", "node_modules"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git", "node_modules"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewConfig
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 160, Height: 40})
@@ -1140,14 +1104,12 @@ func TestExcludeInputModalDoesNotOverflow(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.modal = excludeInputModal
 	m.cfgInputActive = true
-	m.cfgInputTarget = "exclude"
 	m.cfgInput.Placeholder = "Add exclude (example: .git or Library/Caches/*)"
 	m.cfgInput.Prompt = "exclude> "
 	m.cfgInput.SetValue("")
@@ -1166,16 +1128,34 @@ func TestExcludeInputModalDoesNotOverflow(t *testing.T) {
 	}
 }
 
+func TestExcludeInputModalFieldAlwaysHasThreeLines(t *testing.T) {
+	for _, width := range []int{90, 52} {
+		t.Run(fmt.Sprintf("width-%d", width), func(t *testing.T) {
+			m := newTestModel(t, config.Config{
+				DBPath:   "/tmp/test.db",
+				Excludes: []string{".git"},
+				Theme:    "tokyonight",
+			})
+			m.cfgInput.Prompt = "exclude> "
+			m.cfgInput.SetValue("Library/Caches/very-long-pattern-name/*")
+			field := m.renderModalInput(width)
+			lines := strings.Split(field, "\n")
+			if len(lines) != 3 {
+				t.Fatalf("expected top/content/bottom only, got %d lines:\n%s", len(lines), field)
+			}
+		})
+	}
+}
+
 func TestConfigViewShowsAndTogglesDeleteMode(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
-		DeleteMode:      config.DeleteModeTrash,
+		DBPath:     "/tmp/test.db",
+		Excludes:   []string{".git"},
+		Theme:      "tokyonight",
+		DeleteMode: config.DeleteModeTrash,
 	})
 	m.mode = viewConfig
 
@@ -1184,7 +1164,7 @@ func TestConfigViewShowsAndTogglesDeleteMode(t *testing.T) {
 		t.Fatalf("expected delete mode setting rendered, got:\n%s", out)
 	}
 
-	m.cfgCursor = 2
+	m.cfgCursor = 1
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)
 	if next.cfg.DeleteMode != config.DeleteModePermanent {
@@ -1197,18 +1177,17 @@ func TestConfigActionsUseInjectedSaveConfig(t *testing.T) {
 
 	var saved []config.Config
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
-		DeleteMode:      config.DeleteModeTrash,
+		DBPath:     "/tmp/test.db",
+		Excludes:   []string{".git"},
+		Theme:      "tokyonight",
+		DeleteMode: config.DeleteModeTrash,
 	})
 	m.saveConfig = func(cfg config.Config) error {
 		saved = append(saved, cfg)
 		return nil
 	}
 	m.mode = viewConfig
-	m.cfgCursor = 2
+	m.cfgCursor = 1
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	next := updated.(model)
@@ -1223,14 +1202,48 @@ func TestConfigActionsUseInjectedSaveConfig(t *testing.T) {
 	}
 }
 
+func TestExcludePatternEnterPersistsAndEscCancels(t *testing.T) {
+	var saved []config.Config
+	m := newTestModel(t, config.Config{
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
+	})
+	m.saveConfig = func(cfg config.Config) error {
+		saved = append(saved, cfg)
+		return nil
+	}
+	m.mode = viewConfig
+	m.cfgCursor = 0
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	next := updated.(model)
+	if next.modal != excludeInputModal {
+		t.Fatalf("expected add exclude modal, got %v", next.modal)
+	}
+	next.cfgInput.SetValue("Library/Caches/*")
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if !slices.Contains(next.cfg.Excludes, "Library/Caches/*") || len(saved) != 1 {
+		t.Fatalf("expected pattern to persist, excludes=%v saves=%d", next.cfg.Excludes, len(saved))
+	}
+
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	next = updated.(model)
+	next.cfgInput.SetValue("should-not-save")
+	updated, _ = next.Update(tea.KeyEsc)
+	next = updated.(model)
+	if slices.Contains(next.cfg.Excludes, "should-not-save") || len(saved) != 1 {
+		t.Fatalf("expected Esc to cancel without persistence, excludes=%v saves=%d", next.cfg.Excludes, len(saved))
+	}
+}
+
 func TestTopBarHidesIdleStatusWhenNotBusy(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 	m.busy = false
@@ -1251,10 +1264,9 @@ func TestWindowSizeMsgStoresWidthAndHeight(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 40})
@@ -1268,10 +1280,9 @@ func TestSearchViewRendersTableResults(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 	m.searchInput.SetValue("report")
@@ -1312,10 +1323,9 @@ func TestSearchViewEmptyResultsUsesStableResultsArea(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 36})
@@ -1338,10 +1348,9 @@ func TestSearchHelpLineStaysFixedWithFewOrManyResults(t *testing.T) {
 	t.Parallel()
 
 	few := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	few.mode = viewSearch
 	few.searchRes = []db.Entry{
@@ -1378,10 +1387,9 @@ func TestSearchCtrlPNoLongerTogglesPathFilter(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 
@@ -1425,10 +1433,9 @@ func TestOnlyCtrlQQuitsFromSearch(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 
@@ -1454,10 +1461,9 @@ func TestErrorRendersWithoutStatusFooter(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewSearch
 	m.err = errors.New("boom")
@@ -1475,10 +1481,9 @@ func TestConfigModalReplacesCentralContent(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	m.mode = viewConfig
 	m.modal = themeModal
@@ -1496,10 +1501,9 @@ func TestFullScreenFrameRendersBorder(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{
-		DBPath:          "/tmp/test.db",
-		DefaultScanPath: "~",
-		Excludes:        []string{".git"},
-		Theme:           "tokyonight",
+		DBPath:   "/tmp/test.db",
+		Excludes: []string{".git"},
+		Theme:    "tokyonight",
 	})
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 72, Height: 24})
 	next := updated.(model)

@@ -27,7 +27,8 @@ import (
 type viewMode int
 
 const (
-	viewStartup viewMode = iota
+	viewLocation viewMode = iota
+	viewStartup
 	viewSearch
 	viewConfig
 )
@@ -36,7 +37,6 @@ type modalMode int
 
 const (
 	noModal modalMode = iota
-	pathModal
 	themeModal
 	excludeInputModal
 	deleteConfirmModal
@@ -69,6 +69,13 @@ type debounceSearchMsg struct {
 	query string
 }
 
+type locationSuggestionsMsg struct {
+	seq         int
+	input       string
+	suggestions []string
+	err         error
+}
+
 type scanProgressTickMsg struct {
 	session int
 }
@@ -96,10 +103,12 @@ const (
 	mouseTargetSearchResult
 	mouseTargetConfigRow
 	mouseTargetConfigExclude
-	mouseTargetPathOption
 	mouseTargetThemeOption
 	mouseTargetModalInput
 	mouseTargetModalOutside
+	mouseTargetLocationInput
+	mouseTargetLocationRoot
+	mouseTargetLocationSuggestion
 )
 
 type mouseTarget struct {
@@ -176,10 +185,17 @@ type model struct {
 	cfgCursor      int
 	cfgInput       textinput.Model
 	cfgInputActive bool
-	cfgInputTarget string // "scan" | "exclude"
 	cfgThemeCursor int
-	cfgPathCursor  int
-	pathOptions    []string
+
+	locationInput            textinput.Model
+	locationRoots            []string
+	locationRootCursor       int
+	locationSuggestions      []string
+	locationSuggestionCursor int
+	locationSuggestionActive bool
+	locationInputSeq         int
+	locationScanLabel        string
+	activeScanRoot           string
 
 	theme        theme
 	themes       []string
@@ -213,6 +229,9 @@ func Run(ctx context.Context, cfg config.Config) error {
 func newModel(ctx context.Context, cfg config.Config) model {
 	searchInput := textinput.New()
 	searchInput.Placeholder = "Type to search… (/ to focus)"
+	if last := strings.TrimSpace(cfg.LastSearch); last != "" {
+		searchInput.Placeholder = "Last search: " + trimMiddle(last, 48)
+	}
 	searchInput.Prompt = "search> "
 	searchInput.Focus()
 	searchInput.CharLimit = 512
@@ -230,19 +249,24 @@ func newModel(ctx context.Context, cfg config.Config) model {
 		saveConfig:  config.Save,
 		width:       120,
 		height:      36,
-		mode:        viewStartup,
+		mode:        viewLocation,
 		modal:       noModal,
 		searchInput: searchInput,
 		cfgInput:    cfgInput,
 		theme:       themeByName(cfg.Theme),
 		themes:      []string{"tokyonight", "catppuccin", "groovbox"},
-		pathOptions: availablePathOptions(),
-		status:      "preparing initial scan",
+		status:      "choose a location to scan",
 
 		scanProgressSource: newScanProgressSource(),
 	}
+	locationInput := textinput.New()
+	locationInput.Placeholder = "Type a folder path or choose a volume/drive"
+	locationInput.Prompt = "path> "
+	locationInput.CharLimit = 1024
+	m.locationInput = locationInput
 	m.searchTable = newSearchTable(m.theme)
 	m = m.resizeComponents()
+	m = m.openLocationPickerView("initial-scan")
 	return m
 }
 
@@ -311,7 +335,7 @@ func (m model) resizeComponents() model {
 	tableH := max(5, m.contentHeight()-5)
 
 	m.searchInput.Width = min(72, max(24, bodyW-28))
-	m.cfgInput.Width = max(24, min(80, bodyW-12))
+	m.cfgInput.Width = m.modalInputWidth(bodyW)
 	m.searchTable.SetColumns(searchColumns(tableW))
 	m.searchTable.SetWidth(tableW)
 	m.searchTable.SetHeight(tableH)
@@ -455,7 +479,7 @@ func (m model) searchTopRow(width int) (string, int) {
 	top := lipgloss.JoinHorizontal(lipgloss.Center,
 		m.theme.Highlight.Render("search"),
 		m.theme.Muted.Render(" in "),
-		chip(m.cfg.DefaultScanPath, true),
+		chip(m.activeScanRoot, true),
 	)
 	settingsButton := m.settingsButtonView()
 	topAvailable := max(20, width-8)
@@ -533,7 +557,7 @@ func (m model) configExcludeHitbox(index int) hitbox {
 	bodyW, _ := m.bodySize()
 	layout := configLayoutForWidth(bodyW)
 	x := m.contentStartX() + 1
-	y := m.contentStartY() + 20 + index
+	y := m.contentStartY() + 15 + index
 	w := max(24, layout.outerWidth-4)
 	if layout.wide {
 		x = m.contentStartX() + layout.leftW + layout.gap + 1
@@ -550,11 +574,6 @@ func (m model) modalBoxHitbox() hitbox {
 	modalH := 8
 	switch m.modal {
 	case noModal:
-	case pathModal:
-		modalH = 6 + len(m.pathOptions)
-		if m.cfgInputActive {
-			modalH = 11
-		}
 	case themeModal:
 		modalH = 7 + len(m.themes)
 	case excludeInputModal:
@@ -589,18 +608,6 @@ func (m model) resolveMouseTarget(x, y int) mouseTarget {
 	if m.modal != noModal {
 		switch m.modal {
 		case noModal:
-		case pathModal:
-			if m.cfgInputActive {
-				if m.modalInputHitbox().contains(x, y) {
-					return mouseTarget{kind: mouseTargetModalInput}
-				}
-			} else {
-				for i := range m.pathOptions {
-					if m.pathOptionHitbox(i).contains(x, y) {
-						return mouseTarget{kind: mouseTargetPathOption, index: i}
-					}
-				}
-			}
 		case themeModal:
 			for i := range m.themes {
 				if m.themeOptionHitbox(i).contains(x, y) {
@@ -620,7 +627,23 @@ func (m model) resolveMouseTarget(x, y int) mouseTarget {
 	}
 
 	switch m.mode {
-	case viewStartup:
+	case viewLocation:
+		if m.locationInputHitbox().contains(x, y) {
+			return mouseTarget{kind: mouseTargetLocationInput}
+		}
+		if strings.TrimSpace(m.locationInput.Value()) == "" {
+			for i := range m.locationRoots {
+				if m.locationRootHitbox(i).contains(x, y) {
+					return mouseTarget{kind: mouseTargetLocationRoot, index: i}
+				}
+			}
+		} else {
+			for i := range m.locationSuggestions {
+				if m.locationSuggestionHitbox(i).contains(x, y) {
+					return mouseTarget{kind: mouseTargetLocationSuggestion, index: i}
+				}
+			}
+		}
 	case viewSearch:
 		if m.settingsButtonHitbox().contains(x, y) {
 			return mouseTarget{kind: mouseTargetSettings}
@@ -698,19 +721,16 @@ func (m model) focusSearchInput() model {
 }
 
 func (m model) activateConfigRow(index int) (model, tea.Cmd) {
-	m.cfgCursor = min(max(0, index), 2+max(0, len(m.cfg.Excludes)))
+	m.cfgCursor = min(max(0, index), 1+max(0, len(m.cfg.Excludes)))
 	switch index {
 	case 0:
-		m.modal = pathModal
-		m.cfgPathCursor = 0
-	case 1:
 		m.modal = themeModal
 		idx := slices.Index(m.themes, m.cfg.Theme)
 		if idx < 0 {
 			idx = 0
 		}
 		m.cfgThemeCursor = idx
-	case 2:
+	case 1:
 		m.cfg.DeleteMode = nextDeleteMode(m.cfg.DeleteMode)
 		if err := m.saveConfig(m.cfg); err != nil {
 			m.err = err
@@ -726,7 +746,7 @@ func (m model) removeExcludeAt(index int) model {
 		return m
 	}
 	m.cfg.Excludes = append(m.cfg.Excludes[:index], m.cfg.Excludes[index+1:]...)
-	m.cfgCursor = min(m.cfgCursor, 2+max(0, len(m.cfg.Excludes)))
+	m.cfgCursor = min(m.cfgCursor, 1+max(0, len(m.cfg.Excludes)))
 	if len(m.cfg.Excludes) == 0 {
 		m.cfg.Excludes = scanner.DefaultExcludes()
 	}
@@ -736,28 +756,6 @@ func (m model) removeExcludeAt(index int) model {
 		m.status = "exclude removed"
 	}
 	return m
-}
-
-func (m model) handlePathOptionClick(index int) (model, tea.Cmd) {
-	if index < 0 || index >= len(m.pathOptions) {
-		return m, nil
-	}
-	m.cfgPathCursor = index
-	choice := m.pathOptions[index]
-	if choice == "__custom__" {
-		m.cfgInputActive = true
-		m.cfgInputTarget = "scan"
-		m.cfgInput.SetValue("")
-		m.cfgInput.Placeholder = "Custom scan path (example: ~/Projects)"
-		m.cfgInput.Prompt = "scan-path> "
-		return m, m.cfgInput.Focus()
-	}
-	next, err := m.saveScanPath(choice)
-	if err != nil {
-		m.err = err
-		return m, nil
-	}
-	return next.closeModal(), nil
 }
 
 // noinspection GoAssignmentToReceiver
@@ -787,7 +785,7 @@ func (m model) scrollSearchResults(delta int) model {
 }
 
 func (m model) scrollConfig(delta int) model {
-	totalRows := 3 + len(m.cfg.Excludes)
+	totalRows := 2 + len(m.cfg.Excludes)
 	if totalRows <= 0 {
 		return m
 	}
@@ -798,10 +796,6 @@ func (m model) scrollConfig(delta int) model {
 func (m model) scrollModal(delta int) model {
 	switch m.modal {
 	case noModal:
-	case pathModal:
-		if !m.cfgInputActive && len(m.pathOptions) > 0 {
-			m.cfgPathCursor = min(max(0, m.cfgPathCursor+delta), len(m.pathOptions)-1)
-		}
 	case themeModal:
 		if len(m.themes) > 0 {
 			m.cfgThemeCursor = min(max(0, m.cfgThemeCursor+delta), len(m.themes)-1)
@@ -842,6 +836,8 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 			return m.scrollModal(delta), nil
 		}
 		switch m.mode {
+		case viewLocation:
+			m = m.scrollLocation(delta)
 		case viewStartup:
 		case viewSearch:
 			m = m.scrollSearchResults(delta)
@@ -856,7 +852,7 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m.openSelectedDeleteModal(target.index), nil
 	}
 	if rightClick && target.kind == mouseTargetConfigExclude {
-		m.cfgCursor = target.index + 3
+		m.cfgCursor = target.index + 2
 		return m.removeExcludeAt(target.index), nil
 	}
 
@@ -898,11 +894,15 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	case mouseTargetConfigRow:
 		return m.activateConfigRow(target.index)
 	case mouseTargetConfigExclude:
-		m.cfgCursor = target.index + 3
-	case mouseTargetPathOption:
-		return m.handlePathOptionClick(target.index)
+		m.cfgCursor = target.index + 2
 	case mouseTargetThemeOption:
 		return m.handleThemeOptionClick(target.index)
+	case mouseTargetLocationInput:
+		m.locationInput.Focus()
+	case mouseTargetLocationRoot:
+		return m.selectLocationRoot(target.index)
+	case mouseTargetLocationSuggestion:
+		return m.confirmLocationPath(m.locationSuggestions[target.index])
 	case mouseTargetModalInput:
 		m.cfgInputActive = true
 		return m, m.cfgInput.Focus()
@@ -929,18 +929,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.err = msg.err
 		}
-		if !m.busy && !m.startupScanAttempted {
-			roots, err := defaultScanRoots(m.cfg)
-			if err != nil {
-				m.err = err
-				m.status = "initial scan failed"
-				m.startupScanAttempted = true
-				m = m.openSettingsView()
-				return m, nil
-			}
-			m.startupScanAttempted = true
-			m.status = "initial scan in progress…"
-			return m.startScanCmd(roots, "initial-scan", false)
+		return m, nil
+
+	case locationSuggestionsMsg:
+		if msg.seq != m.locationInputSeq || msg.input != m.locationInput.Value() {
+			return m, nil
+		}
+		m.locationSuggestions = msg.suggestions
+		m.locationSuggestionCursor = -1
+		m.locationSuggestionActive = false
+		if msg.err != nil && strings.TrimSpace(msg.input) != "" {
+			m.err = msg.err
+		} else if msg.err == nil {
+			m.err = nil
 		}
 		return m, nil
 
@@ -951,8 +952,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchCur = max(0, len(m.searchRes)-1)
 			}
 			m = m.syncSearchTableRows()
+			m.err = msg.err
 		}
-		m.err = msg.err
 		return m, nil
 
 	case reindexDoneMsg:
@@ -962,7 +963,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if errors.Is(msg.err, context.Canceled) {
 			m.err = nil
 			m.status = "scan canceled"
-			m = m.openSettingsView()
+			m = m.openLocationPickerView("manual-scan")
 			return m, countCmd(m.ctx, m.cfg.DBPath)
 		}
 		m.err = msg.err
@@ -971,7 +972,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m = m.focusSearchView()
 		} else {
 			m.status = "re-index failed"
-			m = m.openSettingsView()
+			m = m.openLocationPickerView("manual-scan")
 		}
 		return m, countCmd(m.ctx, m.cfg.DBPath)
 
@@ -985,7 +986,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.err = nil
 			m.status = "scan canceled"
 			if startup || manual {
-				m = m.openSettingsView()
+				m = m.openLocationPickerView(msg.label)
 			}
 			return m, countCmd(m.ctx, m.cfg.DBPath)
 		}
@@ -998,7 +999,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.status = msg.label + " failed"
 			if startup || manual {
-				m = m.openSettingsView()
+				m = m.openLocationPickerView(msg.label)
 			}
 		}
 		return m, countCmd(m.ctx, m.cfg.DBPath)
@@ -1011,7 +1012,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.searchRes = nil
 			return m, nil
 		}
-		return m, searchCmd(m.ctx, m.cfg.DBPath, msg.query)
+		if m.cfg.LastSearch != msg.query {
+			m.cfg.LastSearch = msg.query
+			if err := m.saveConfig(m.cfg); err != nil {
+				m.err = err
+			}
+		}
+		return m, searchCmd(m.ctx, m.cfg.DBPath, msg.query, m.activeScanRoot)
 
 	case scanProgressTickMsg:
 		if msg.session != m.scanSession || !m.busy || m.scanProgressSource == nil {
@@ -1044,13 +1051,6 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.modal != noModal {
 			return m.handleModalKey(msg)
 		}
-		if m.mode == viewStartup {
-			switch msg.String() {
-			case "ctrl+x":
-			default:
-				return m, nil
-			}
-		}
 		switch msg.String() {
 		case "ctrl+x":
 			if m.busy && m.scanCancel != nil {
@@ -1060,14 +1060,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case "ctrl+g":
 			if !m.busy {
-				roots, err := defaultScanRoots(m.cfg)
-				if err != nil {
-					m.err = err
-					return m, nil
-				}
-				m.status = "manual scan in progress…"
-				m.mode = viewStartup
-				return m.startScanCmd(roots, "manual-scan", false)
+				m = m.openLocationPickerView("manual-scan")
+				return m, nil
 			}
 		case "ctrl+s":
 			if m.mode == viewSearch {
@@ -1082,6 +1076,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		switch m.mode {
+		case viewLocation:
+			return m.updateLocation(msg)
 		case viewSearch:
 			return m.updateSearch(msg)
 		case viewConfig:
@@ -1096,6 +1092,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 // noinspection GoAssignmentToReceiver
 func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	m.searchInput.Focus()
 	switch msg.String() {
 	case "tab":
 		return m, nil
@@ -1131,7 +1128,7 @@ func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // noinspection GoAssignmentToReceiver
 func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	totalRows := 3 + len(m.cfg.Excludes) // 0 scan,1 theme,2 delete mode,3.. excludes
+	totalRows := 2 + len(m.cfg.Excludes) // 0 theme,1 delete mode,2.. excludes
 	maxCursor := totalRows - 1
 	switch msg.String() {
 	case "j", "down":
@@ -1141,7 +1138,6 @@ func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "a":
 		m.modal = excludeInputModal
 		m.cfgInputActive = true
-		m.cfgInputTarget = "exclude"
 		m.cfgInput.Placeholder = "Add exclude (example: .git or Library/Caches/*)"
 		m.cfgInput.Prompt = "exclude> "
 		m.cfgInput.SetValue("")
@@ -1149,7 +1145,7 @@ func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		return m.activateConfigRow(m.cfgCursor)
 	case "d":
-		exIdx := m.cfgCursor - 3
+		exIdx := m.cfgCursor - 2
 		m = m.removeExcludeAt(exIdx)
 	}
 	return m, nil
@@ -1157,8 +1153,6 @@ func (m model) updateConfig(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.modal {
-	case pathModal:
-		return m.handlePathModalKey(msg)
 	case themeModal:
 		return m.handleThemeModalKey(msg)
 	case excludeInputModal:
@@ -1173,62 +1167,12 @@ func (m model) handleModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m model) closeModal() model {
 	m.modal = noModal
 	m.cfgInputActive = false
-	m.cfgInputTarget = ""
 	m.cfgInput.Blur()
 	m.cfgInput.SetValue("")
 	m.hasDeleteTarget = false
 	m.deleteIndex = 0
 	m.deleteTarget = db.Entry{}
 	return m
-}
-
-func (m model) handlePathModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if m.cfgInputActive {
-		switch msg.String() {
-		case "enter":
-			value := strings.TrimSpace(m.cfgInput.Value())
-			if value == "" {
-				return m.closeModal(), nil
-			}
-			next, err := m.saveScanPath(value)
-			if err != nil {
-				m.err = err
-				return m, nil
-			}
-			return next.closeModal(), nil
-		case "esc":
-			return m.closeModal(), nil
-		}
-		var cmd tea.Cmd
-		m.cfgInput, cmd = m.cfgInput.Update(msg)
-		return m, cmd
-	}
-
-	switch msg.String() {
-	case "j", "down":
-		m.cfgPathCursor = min(len(m.pathOptions)-1, m.cfgPathCursor+1)
-	case "k", "up":
-		m.cfgPathCursor = max(0, m.cfgPathCursor-1)
-	case "enter":
-		choice := m.pathOptions[m.cfgPathCursor]
-		if choice == "__custom__" {
-			m.cfgInputActive = true
-			m.cfgInputTarget = "scan"
-			m.cfgInput.SetValue("")
-			m.cfgInput.Placeholder = "Custom scan path (example: ~/Projects)"
-			m.cfgInput.Prompt = "scan-path> "
-			return m, m.cfgInput.Focus()
-		}
-		next, err := m.saveScanPath(choice)
-		if err != nil {
-			m.err = err
-			return m, nil
-		}
-		return next.closeModal(), nil
-	case "esc":
-		return m.closeModal(), nil
-	}
-	return m, nil
 }
 
 // noinspection GoAssignmentToReceiver
@@ -1295,26 +1239,6 @@ func (m model) handleDeleteConfirmModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 	return m, nil
 }
 
-func (m model) saveScanPath(value string) (model, error) {
-	root, err := config.ExpandPath(value)
-	if err != nil {
-		return m, err
-	}
-	info, statErr := os.Stat(root)
-	if statErr != nil {
-		return m, statErr
-	}
-	if !info.IsDir() {
-		return m, fmt.Errorf("%s is not a directory", root)
-	}
-	m.cfg.DefaultScanPath = value
-	if err := m.saveConfig(m.cfg); err != nil {
-		return m, err
-	}
-	m.status = "saved scan location"
-	return m, nil
-}
-
 func (m model) removeDeletedResult(entry db.Entry) model {
 	if len(m.searchRes) == 0 {
 		return m.syncSearchTableRows()
@@ -1350,7 +1274,7 @@ func (m model) renderFrame() string {
 	screenW, screenH := m.screenSize()
 	bodyW, bodyH := m.bodySize()
 
-	if m.mode == viewStartup {
+	if m.mode == viewLocation || m.mode == viewStartup {
 		body := lipgloss.NewStyle().
 			Width(bodyW).
 			Height(bodyH).
@@ -1423,6 +1347,8 @@ func blockLines(block string) []string {
 func (m model) renderContent(width, height int) string {
 	var content string
 	switch m.mode {
+	case viewLocation:
+		content = m.viewLocation(width, height)
 	case viewStartup:
 		content = m.viewStartup(width, height)
 	case viewSearch:
@@ -1445,6 +1371,8 @@ func (m model) renderHelp() string {
 	keys := "j/k move • enter select • ctrl+g scan now • ctrl+x stop scan • esc back • ctrl+q quit"
 	if m.modal != noModal {
 		keys = "j/k or wheel move • click select • esc/outside click close modal • ctrl+q quit"
+	} else if m.mode == viewLocation {
+		keys = "↑/↓ move • tab/→ complete • enter scan • esc quit • mouse select"
 	} else if m.mode == viewStartup {
 		keys = "ctrl+x cancel • ctrl+q quit"
 	} else if m.mode == viewConfig {
@@ -1460,7 +1388,11 @@ func (m model) renderTopBar() string {
 	innerWidth := max(24, bodyW)
 
 	scopeLen := max(8, innerWidth/4)
-	basePlain := fmt.Sprintf("◌ GoEverything %d indexed scope %s", m.totalIndexed, trimMiddle(m.cfg.DefaultScanPath, scopeLen))
+	scope := m.activeScanRoot
+	if strings.TrimSpace(scope) == "" {
+		scope = "(no scan selected)"
+	}
+	basePlain := fmt.Sprintf("◌ GoEverything %d indexed scope %s", m.totalIndexed, trimMiddle(scope, scopeLen))
 	lastPlain := "scan took " + prettyDuration(m.lastMetrics.Elapsed)
 
 	lastView := lipgloss.NewStyle().
@@ -1697,8 +1629,6 @@ func padToWidth(s string, width int) string {
 func (m model) renderModal(width, height int) string {
 	var modal string
 	switch m.modal {
-	case pathModal:
-		modal = m.renderPathModal(width)
 	case themeModal:
 		modal = m.renderThemeModal(width)
 	case excludeInputModal:
@@ -1727,48 +1657,26 @@ func (m model) modalContentWidth(width int) int {
 	return max(20, m.modalWidth(width)-4)
 }
 
+func (m model) modalInputContentWidth(width int) int {
+	return max(18, m.modalContentWidth(width)-2)
+}
+
+func (m model) modalInputWidth(width int) int {
+	contentW := m.modalInputContentWidth(width)
+	return max(10, min(60, contentW-4-lipgloss.Width(m.cfgInput.Prompt)))
+}
+
 func (m model) renderModalInput(width int) string {
-	contentW := max(18, m.modalContentWidth(width)-2)
-	inputW := max(12, contentW-4)
+	contentW := m.modalInputContentWidth(width)
 	input := m.cfgInput
-	input.Width = inputW
+	input.Width = m.modalInputWidth(width)
+	input.CursorEnd()
 	return lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(m.theme.Input).
 		Padding(0, 1).
 		Width(contentW).
 		Render(input.View())
-}
-
-func (m model) renderPathModal(width int) string {
-	lines := []string{
-		m.theme.Title.Render("SELECT LOCATION"),
-		m.theme.Muted.Render("j/k move • enter select • esc cancel"),
-	}
-	if m.cfgInputActive {
-		lines = append(lines,
-			"",
-			m.theme.Muted.Render("Custom scan path"),
-			m.renderModalInput(width),
-		)
-		return m.modalStyle(width).Render(strings.Join(lines, "\n"))
-	}
-	for i, p := range m.pathOptions {
-		label := p
-		if p == "__custom__" {
-			label = "Custom path..."
-		}
-		prefix := "  "
-		st := m.theme.Text
-		if i == m.cfgPathCursor {
-			prefix = "➜ "
-			st = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SelectBG).Bold(true)
-		} else if m.mouseHoverMatches(mouseTargetPathOption, i) {
-			st = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SurfaceBG)
-		}
-		lines = append(lines, st.Render(prefix+trimMiddle(label, max(12, min(64, width-16)))))
-	}
-	return m.modalStyle(width).Render(strings.Join(lines, "\n"))
 }
 
 func (m model) renderThemeModal(width int) string {
@@ -1860,16 +1768,15 @@ func (m model) viewConfig(width, height int) string {
 
 	leftRows := []string{
 		m.theme.Title.Render("SETTINGS"),
-		configRow(0, "scan location", m.cfg.DefaultScanPath, "↵ change", layout.leftInnerW),
-		configRow(1, "theme", m.cfg.Theme, "↵ select", layout.leftInnerW),
-		configRow(2, "delete mode", deleteModeLabel(m.cfg.DeleteMode), "↵ toggle", layout.leftInnerW),
+		configRow(0, "theme", m.cfg.Theme, "↵ select", layout.leftInnerW),
+		configRow(1, "delete mode", deleteModeLabel(m.cfg.DeleteMode), "↵ toggle", layout.leftInnerW),
 	}
 	leftPanel := strings.Join(leftRows, "\n\n")
 
 	rightRows := []string{m.theme.Title.Render("EXCLUDE PATTERNS")}
 	var exLines []string
 	for i, ex := range m.cfg.Excludes {
-		idx := i + 3
+		idx := i + 2
 		row := "◌ " + trimMiddle(ex, max(12, layout.rightInnerW-6))
 		st := m.theme.Text
 		if m.cfgCursor == idx {
@@ -1911,18 +1818,22 @@ func deleteModeLabel(mode string) string {
 	return "Trash"
 }
 
-func searchCmd(ctx context.Context, dbPath, query string) tea.Cmd {
+func searchCmd(ctx context.Context, dbPath, query, root string) tea.Cmd {
 	return func() tea.Msg {
 		store, err := db.Open(ctx, dbPath)
 		if err != nil {
 			return searchDoneMsg{query: query, err: err}
 		}
 		defer func() { _ = store.Close() }()
-		res, err := store.SearchAdvanced(ctx, db.SearchOptions{
+		options := db.SearchOptions{
 			Query:  query,
 			Limit:  100,
 			Offset: 0,
-		})
+		}
+		if strings.TrimSpace(root) != "" {
+			options.Root = filepath.Clean(root)
+		}
+		res, err := store.SearchAdvanced(ctx, options)
 		return searchDoneMsg{query: query, results: res, err: err}
 	}
 }
@@ -2084,25 +1995,6 @@ func openCommand(path string, reveal bool) *exec.Cmd {
 		}
 		return exec.Command("xdg-open", path)
 	}
-}
-
-func defaultScanRoots(cfg config.Config) ([]string, error) {
-	root, err := config.ExpandPath(cfg.DefaultScanPath)
-	if err != nil {
-		return nil, err
-	}
-	return []string{root}, nil
-}
-
-func availablePathOptions() []string {
-	opts := []string{"~", "__custom__"}
-	for _, root := range scanner.DiscoverRoots() {
-		if root == "/" || root == "~" {
-			continue
-		}
-		opts = append(opts, root)
-	}
-	return opts
 }
 
 type theme struct {
