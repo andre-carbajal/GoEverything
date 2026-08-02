@@ -34,15 +34,15 @@ func TestLinuxWatcherIndexesCreatedFile(t *testing.T) {
 	if err := os.WriteFile(path, []byte("hello"), 0o644); err != nil {
 		t.Fatalf("write file: %v", err)
 	}
-	waitForWatch(t, func() bool {
-		results, searchErr := store.SearchAdvanced(context.Background(), db.SearchOptions{Query: "created-linux", Limit: 10, Offset: 0})
+	waitForWatch(t, ctx, watchErr, func() bool {
+		results, searchErr := store.SearchAdvanced(ctx, db.SearchOptions{Query: "created-linux", Limit: 10, Offset: 0})
 		return searchErr == nil && len(results) == 1
 	})
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("remove file: %v", err)
 	}
-	waitForWatch(t, func() bool {
-		results, searchErr := store.SearchAdvanced(context.Background(), db.SearchOptions{Query: "created-linux", Limit: 10, Offset: 0})
+	waitForWatch(t, ctx, watchErr, func() bool {
+		results, searchErr := store.SearchAdvanced(ctx, db.SearchOptions{Query: "created-linux", Limit: 10, Offset: 0})
 		return searchErr == nil && len(results) == 0
 	})
 
@@ -79,15 +79,15 @@ func TestLinuxWatcherIndexesDirectoryContents(t *testing.T) {
 	if err := os.WriteFile(path, []byte("hello"), 0o644); err != nil {
 		t.Fatalf("write nested file: %v", err)
 	}
-	waitForWatch(t, func() bool {
-		results, searchErr := store.SearchAdvanced(context.Background(), db.SearchOptions{Query: "nested-linux", Limit: 10, Offset: 0})
+	waitForWatch(t, ctx, watchErr, func() bool {
+		results, searchErr := store.SearchAdvanced(ctx, db.SearchOptions{Query: "nested-linux", Limit: 10, Offset: 0})
 		return searchErr == nil && len(results) == 1
 	})
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatalf("remove nested dir: %v", err)
 	}
-	waitForWatch(t, func() bool {
-		results, searchErr := store.SearchAdvanced(context.Background(), db.SearchOptions{Query: "nested-linux", Limit: 10, Offset: 0})
+	waitForWatch(t, ctx, watchErr, func() bool {
+		results, searchErr := store.SearchAdvanced(ctx, db.SearchOptions{Query: "nested-linux", Limit: 10, Offset: 0})
 		return searchErr == nil && len(results) == 0
 	})
 
@@ -111,15 +111,17 @@ func TestLinuxWatcherReportsOverflow(t *testing.T) {
 	}
 }
 
-func waitForWatch(t *testing.T, predicate func() bool) {
+func waitForWatch(t *testing.T, ctx context.Context, watchErr <-chan error, predicate func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
 		if predicate() {
 			return
 		}
+		checkWatcherState(t, ctx, watchErr)
 		time.Sleep(50 * time.Millisecond)
 	}
+	checkWatcherState(t, ctx, watchErr)
 	t.Fatal("timed out waiting for watcher update")
 }
 
@@ -145,22 +147,22 @@ func TestLinuxWatcherMaintainsDirectorySizes(t *testing.T) {
 	go func() { watchErr <- New(store).Run(ctx, root) }()
 	time.Sleep(100 * time.Millisecond)
 
-	waitForDirectorySize(t, store, root, 2)
+	waitForDirectorySize(t, ctx, watchErr, store, root, 2)
 	created := filepath.Join(root, "created.bin")
 	if err := os.WriteFile(created, []byte("1234567"), 0o644); err != nil {
 		t.Fatalf("write created file: %v", err)
 	}
-	waitForDirectorySize(t, store, root, 9)
+	waitForDirectorySize(t, ctx, watchErr, store, root, 9)
 
 	if err := os.WriteFile(created, []byte("12345678901"), 0o644); err != nil {
 		t.Fatalf("modify created file: %v", err)
 	}
-	waitForDirectorySize(t, store, root, 13)
+	waitForDirectorySize(t, ctx, watchErr, store, root, 13)
 
 	if err := os.Remove(created); err != nil {
 		t.Fatalf("remove created file: %v", err)
 	}
-	waitForDirectorySize(t, store, root, 2)
+	waitForDirectorySize(t, ctx, watchErr, store, root, 2)
 
 	cancel()
 	select {
@@ -173,11 +175,11 @@ func TestLinuxWatcherMaintainsDirectorySizes(t *testing.T) {
 	}
 }
 
-func waitForDirectorySize(t *testing.T, store *db.Store, path string, want int64) {
+func waitForDirectorySize(t *testing.T, ctx context.Context, watchErr <-chan error, store *db.Store, path string, want int64) {
 	t.Helper()
 	deadline := time.Now().Add(4 * time.Second)
 	for time.Now().Before(deadline) {
-		results, err := store.SearchAdvanced(context.Background(), db.SearchOptions{
+		results, err := store.SearchAdvanced(ctx, db.SearchOptions{
 			Query:    "*",
 			OnlyDirs: true,
 			Limit:    1000,
@@ -189,7 +191,23 @@ func waitForDirectorySize(t *testing.T, store *db.Store, path string, want int64
 				}
 			}
 		}
+		checkWatcherState(t, ctx, watchErr)
 		time.Sleep(25 * time.Millisecond)
 	}
+	checkWatcherState(t, ctx, watchErr)
 	t.Fatalf("directory %q did not reach size %d", path, want)
+}
+
+func checkWatcherState(t *testing.T, ctx context.Context, watchErr <-chan error) {
+	t.Helper()
+	select {
+	case err := <-watchErr:
+		if err == nil {
+			t.Fatal("watcher stopped unexpectedly")
+		}
+		t.Fatalf("watcher: %v", err)
+	case <-ctx.Done():
+		t.Fatalf("watch context canceled: %v", ctx.Err())
+	default:
+	}
 }

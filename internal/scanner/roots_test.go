@@ -1,6 +1,9 @@
 package scanner
 
-import "testing"
+import (
+	"path/filepath"
+	"testing"
+)
 
 func TestSortRootsKeepsHomeFirstAndDeduplicates(t *testing.T) {
 	got := sortRoots([]string{"/", "~", "/", "~/", "/tmp/../tmp"})
@@ -11,7 +14,7 @@ func TestSortRootsKeepsHomeFirstAndDeduplicates(t *testing.T) {
 
 func TestDeduplicateRootsRemovesNestedPaths(t *testing.T) {
 	got := DeduplicateRoots([]string{"/", "/home", "/home/user", "/mnt/data"})
-	want := []string{"/"}
+	want := []string{filepath.Clean("/")}
 	if len(got) != len(want) || got[0] != want[0] {
 		t.Fatalf("unexpected roots: want=%v got=%v", want, got)
 	}

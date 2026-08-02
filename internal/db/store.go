@@ -37,6 +37,11 @@ type Store struct {
 	db *sql.DB
 }
 
+const (
+	maxTransactionAttempts = 6
+	transactionRetryDelay  = 20 * time.Millisecond
+)
+
 func Open(ctx context.Context, dbPath string) (*Store, error) {
 	store, err := openStore(ctx, dbPath)
 	if err != nil {
@@ -279,10 +284,19 @@ func (s *Store) UpsertBatch(ctx context.Context, entries []Entry) error {
 	if len(entries) == 0 {
 		return nil
 	}
+	return s.upsertBatchOnce(ctx, entries)
+}
 
+func (s *Store) upsertBatchOnce(ctx context.Context, entries []Entry) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
+		return upsertBatchTx(ctx, tx, entries)
+	})
+}
+
+func (s *Store) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
 	var err error
-	for attempt := 0; attempt < 6; attempt++ {
-		err = s.upsertBatchOnce(ctx, entries)
+	for attempt := 0; attempt < maxTransactionAttempts; attempt++ {
+		err = s.withTxOnce(ctx, fn)
 		if err == nil {
 			return nil
 		}
@@ -293,19 +307,13 @@ func (s *Store) UpsertBatch(ctx context.Context, entries []Entry) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(time.Duration(20*(1<<attempt)) * time.Millisecond):
+		case <-time.After(transactionRetryDelay * (1 << attempt)):
 		}
 	}
 	return err
 }
 
-func (s *Store) upsertBatchOnce(ctx context.Context, entries []Entry) error {
-	return s.withTx(ctx, func(tx *sql.Tx) error {
-		return upsertBatchTx(ctx, tx, entries)
-	})
-}
-
-func (s *Store) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
+func (s *Store) withTxOnce(ctx context.Context, fn func(*sql.Tx) error) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -691,7 +699,9 @@ func isBusyError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "database is locked") || strings.Contains(msg, "sqlite_busy")
+	return strings.Contains(msg, "database is locked") ||
+		strings.Contains(msg, "sqlite_busy") ||
+		strings.Contains(msg, "sqlite_busy_snapshot")
 }
 
 func (s *Store) DeleteByPath(ctx context.Context, path string) error {

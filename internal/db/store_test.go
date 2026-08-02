@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -10,6 +11,31 @@ import (
 
 	_ "modernc.org/sqlite"
 )
+
+func TestStoreRetriesBusyTransactions(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "retry.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	attempts := 0
+	err = store.withTx(ctx, func(tx *sql.Tx) error {
+		attempts++
+		if attempts < 3 {
+			return errors.New("SQLITE_BUSY_SNAPSHOT")
+		}
+		_, err := tx.ExecContext(ctx, `CREATE TABLE retry_probe (id INTEGER PRIMARY KEY)`)
+		return err
+	})
+	if err != nil {
+		t.Fatalf("transaction retry: %v", err)
+	}
+	if attempts != 3 {
+		t.Fatalf("expected 3 transaction attempts, got %d", attempts)
+	}
+}
 
 func testPath(parts ...string) string {
 	all := append([]string{string(filepath.Separator)}, parts...)
