@@ -97,6 +97,7 @@ func (w *Watcher) Run(ctx context.Context, root string) error {
 					}
 				}
 				debounceTimer.Reset(50 * time.Millisecond)
+				debounceC = debounceTimer.C
 			}
 		case <-debounceC:
 			if err := flush(); err != nil {
