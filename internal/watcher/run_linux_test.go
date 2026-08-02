@@ -35,14 +35,14 @@ func TestLinuxWatcherIndexesCreatedFile(t *testing.T) {
 		t.Fatalf("write file: %v", err)
 	}
 	waitForWatch(t, func() bool {
-		results, searchErr := store.Search(context.Background(), "created-linux", 10, 0)
+		results, searchErr := store.SearchAdvanced(context.Background(), db.SearchOptions{Query: "created-linux", Limit: 10, Offset: 0})
 		return searchErr == nil && len(results) == 1
 	})
 	if err := os.Remove(path); err != nil {
 		t.Fatalf("remove file: %v", err)
 	}
 	waitForWatch(t, func() bool {
-		results, searchErr := store.Search(context.Background(), "created-linux", 10, 0)
+		results, searchErr := store.SearchAdvanced(context.Background(), db.SearchOptions{Query: "created-linux", Limit: 10, Offset: 0})
 		return searchErr == nil && len(results) == 0
 	})
 
@@ -80,14 +80,14 @@ func TestLinuxWatcherIndexesDirectoryContents(t *testing.T) {
 		t.Fatalf("write nested file: %v", err)
 	}
 	waitForWatch(t, func() bool {
-		results, searchErr := store.Search(context.Background(), "nested-linux", 10, 0)
+		results, searchErr := store.SearchAdvanced(context.Background(), db.SearchOptions{Query: "nested-linux", Limit: 10, Offset: 0})
 		return searchErr == nil && len(results) == 1
 	})
 	if err := os.RemoveAll(dir); err != nil {
 		t.Fatalf("remove nested dir: %v", err)
 	}
 	waitForWatch(t, func() bool {
-		results, searchErr := store.Search(context.Background(), "nested-linux", 10, 0)
+		results, searchErr := store.SearchAdvanced(context.Background(), db.SearchOptions{Query: "nested-linux", Limit: 10, Offset: 0})
 		return searchErr == nil && len(results) == 0
 	})
 
@@ -135,7 +135,7 @@ func TestLinuxWatcherMaintainsDirectorySizes(t *testing.T) {
 		t.Fatalf("open db: %v", err)
 	}
 	defer func() { _ = store.Close() }()
-	if _, err := (scanner.Runner{Indexer: store, Backend: scanner.BackendWalk}).Scan(context.Background(), []string{root}); err != nil {
+	if _, err := (scanner.Runner{Store: store, Backend: scanner.BackendWalk}).Scan(context.Background(), []string{root}); err != nil {
 		t.Fatalf("initial scan: %v", err)
 	}
 

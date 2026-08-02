@@ -9,8 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/uptrace/bun"
-	"github.com/uptrace/bun/dialect/sqlitedialect"
 	_ "modernc.org/sqlite"
 )
 
@@ -36,8 +34,7 @@ type SearchOptions struct {
 }
 
 type Store struct {
-	db  *sql.DB
-	bun *bun.DB
+	db *sql.DB
 }
 
 func Open(ctx context.Context, dbPath string) (*Store, error) {
@@ -63,14 +60,10 @@ func openStore(_ context.Context, dbPath string) (*Store, error) {
 		return nil, err
 	}
 
-	bunDB := bun.NewDB(sqlDB, sqlitedialect.New())
-	return &Store{db: sqlDB, bun: bunDB}, nil
+	return &Store{db: sqlDB}, nil
 }
 
 func (s *Store) Close() error {
-	if s.bun != nil {
-		_ = s.bun.Close()
-	}
 	if s.db != nil {
 		return s.db.Close()
 	}
@@ -307,12 +300,24 @@ func (s *Store) UpsertBatch(ctx context.Context, entries []Entry) error {
 }
 
 func (s *Store) upsertBatchOnce(ctx context.Context, entries []Entry) error {
-	return s.bun.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
 		return upsertBatchTx(ctx, tx, entries)
 	})
 }
 
-func upsertBatchTx(ctx context.Context, tx bun.Tx, entries []Entry) error {
+func (s *Store) withTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func upsertBatchTx(ctx context.Context, tx *sql.Tx, entries []Entry) error {
 	now := time.Now().Unix()
 
 	dirSet := make(map[string]struct{}, len(entries))
@@ -321,38 +326,46 @@ func upsertBatchTx(ctx context.Context, tx bun.Tx, entries []Entry) error {
 		dirSet[dirPath] = struct{}{}
 	}
 
-	dirs := make([]*DirectoryModel, 0, len(dirSet))
-	paths := make([]string, 0, len(dirSet))
+	insertDir, err := tx.PrepareContext(ctx, `INSERT INTO directories(path) VALUES (?) ON CONFLICT(path) DO NOTHING`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = insertDir.Close() }()
+	selectDirID, err := tx.PrepareContext(ctx, `SELECT id FROM directories WHERE path = ?`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = selectDirID.Close() }()
 	for path := range dirSet {
-		dirs = append(dirs, &DirectoryModel{Path: path})
-		paths = append(paths, path)
-	}
-
-	if len(dirs) > 0 {
-		if _, err := tx.NewInsert().
-			Model(&dirs).
-			On("CONFLICT (path) DO NOTHING").
-			Exec(ctx); err != nil {
+		if _, err := insertDir.ExecContext(ctx, path); err != nil {
 			return err
 		}
 	}
 
-	var directoryRows []DirectoryModel
-	if len(paths) > 0 {
-		if err := tx.NewSelect().
-			Model(&directoryRows).
-			Where("path IN (?)", bun.List(paths)).
-			Scan(ctx); err != nil {
+	dirIDByPath := make(map[string]int64, len(dirSet))
+	for path := range dirSet {
+		var id int64
+		if err := selectDirID.QueryRowContext(ctx, path).Scan(&id); err != nil {
 			return err
 		}
+		dirIDByPath[path] = id
 	}
 
-	dirIDByPath := make(map[string]int64, len(directoryRows))
-	for _, row := range directoryRows {
-		dirIDByPath[row.Path] = row.ID
+	entryStmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO entries(name, dir_id, ext, size, mtime, is_dir, root, indexed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(dir_id, name) DO UPDATE SET
+			ext = excluded.ext,
+			size = excluded.size,
+			mtime = excluded.mtime,
+			is_dir = excluded.is_dir,
+			root = excluded.root,
+			indexed_at = excluded.indexed_at`)
+	if err != nil {
+		return err
 	}
+	defer func() { _ = entryStmt.Close() }()
 
-	models := make([]*EntryModel, 0, len(entries))
 	for _, entry := range entries {
 		dirPath, baseName := splitPath(entry.Path)
 		dirID, ok := dirIDByPath[dirPath]
@@ -364,33 +377,15 @@ func upsertBatchTx(ctx context.Context, tx bun.Tx, entries []Entry) error {
 		if name == "" {
 			name = baseName
 		}
-		models = append(models, &EntryModel{
-			Name:      name,
-			DirID:     dirID,
-			Ext:       entry.Ext,
-			Size:      entry.Size,
-			MTime:     entry.MTime,
-			IsDir:     entry.IsDir,
-			Root:      entry.Root,
-			IndexedAt: now,
-		})
+		isDir := 0
+		if entry.IsDir {
+			isDir = 1
+		}
+		if _, err := entryStmt.ExecContext(ctx, name, dirID, entry.Ext, entry.Size, entry.MTime, isDir, entry.Root, now); err != nil {
+			return err
+		}
 	}
-
-	if len(models) == 0 {
-		return nil
-	}
-
-	_, err := tx.NewInsert().
-		Model(&models).
-		On("CONFLICT (dir_id, name) DO UPDATE").
-		Set("ext = EXCLUDED.ext").
-		Set("size = EXCLUDED.size").
-		Set("mtime = EXCLUDED.mtime").
-		Set("is_dir = EXCLUDED.is_dir").
-		Set("root = EXCLUDED.root").
-		Set("indexed_at = EXCLUDED.indexed_at").
-		Exec(ctx)
-	return err
+	return nil
 }
 
 func (s *Store) UpdateDirectorySizes(ctx context.Context, sizes map[string]int64) error {
@@ -398,7 +393,7 @@ func (s *Store) UpdateDirectorySizes(ctx context.Context, sizes map[string]int64
 	if len(cleanSizes) == 0 {
 		return nil
 	}
-	return s.bun.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
 		return updateDirectoryValuesTx(ctx, tx, "directory_size_updates", cleanSizes, false)
 	})
 }
@@ -409,7 +404,7 @@ func (s *Store) UpsertBatchWithDirectorySizes(ctx context.Context, entries []Ent
 		return nil
 	}
 
-	return s.bun.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
 		deltas := make(map[string]int64)
 		for _, entry := range entries {
 			oldSize, oldIsDir, exists, err := lookupEntryStateTx(ctx, tx, entry.Path)
@@ -441,7 +436,7 @@ func (s *Store) DeleteByPrefixWithDirectorySize(ctx context.Context, prefix stri
 	}
 	prefix = filepath.Clean(prefix)
 
-	return s.bun.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
 		total, err := sumFileSizesByPrefixTx(ctx, tx, prefix)
 		if err != nil {
 			return err
@@ -469,7 +464,7 @@ func (s *Store) RecalculateDirectorySizes(ctx context.Context, roots []string) e
 		return nil
 	}
 
-	return s.bun.RunInTx(ctx, nil, func(ctx context.Context, tx bun.Tx) error {
+	return s.withTx(ctx, func(tx *sql.Tx) error {
 		directories := make(map[string]int64)
 		for _, root := range roots {
 			for dir := filepath.Clean(root); ; {
@@ -705,11 +700,10 @@ func (s *Store) DeleteByPath(ctx context.Context, path string) error {
 	}
 	dirPath, baseName := splitPath(path)
 
-	_, err := s.bun.NewDelete().
-		Model((*EntryModel)(nil)).
-		Where("name = ?", baseName).
-		Where("dir_id = (SELECT id FROM directories WHERE path = ?)", dirPath).
-		Exec(ctx)
+	_, err := s.db.ExecContext(ctx, `
+		DELETE FROM entries
+		WHERE name = ?
+		  AND dir_id = (SELECT id FROM directories WHERE path = ?)`, baseName, dirPath)
 	if err != nil {
 		return err
 	}
@@ -729,10 +723,6 @@ func (s *Store) DeleteByPrefix(ctx context.Context, prefix string) error {
 
 func (s *Store) pruneEmptyDirectories(ctx context.Context) error {
 	return pruneEmptyDirectoriesWith(ctx, s.db)
-}
-
-func (s *Store) Search(ctx context.Context, query string, limit, offset int) ([]Entry, error) {
-	return s.SearchAdvanced(ctx, SearchOptions{Query: query, Limit: limit, Offset: offset})
 }
 
 func (s *Store) SearchAdvanced(ctx context.Context, opts SearchOptions) ([]Entry, error) {
@@ -891,7 +881,7 @@ func (s *Store) ReindexFTS(ctx context.Context) error {
 
 func (s *Store) Count(ctx context.Context) (int64, error) {
 	var total int64
-	err := s.bun.NewSelect().Model((*EntryModel)(nil)).ColumnExpr("COUNT(*)").Scan(ctx, &total)
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM entries`).Scan(&total)
 	return total, err
 }
 

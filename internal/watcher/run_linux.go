@@ -179,7 +179,7 @@ func (w *Watcher) scanChangedDirectory(ctx context.Context, path string) error {
 		exclude = scanner.DefaultExcludes()
 	}
 	_, err := (scanner.Runner{
-		Indexer: w.store,
+		Store:   w.store,
 		Workers: scanner.DefaultWorkerCount(),
 		Batch:   2000,
 		Exclude: exclude,
@@ -191,7 +191,7 @@ func (w *Watcher) scanChangedDirectory(ctx context.Context, path string) error {
 	return err
 }
 
-func upsertLinuxPath(ctx context.Context, store IndexStore, root, path string) error {
+func upsertLinuxPath(ctx context.Context, store *db.Store, root, path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {

@@ -52,8 +52,9 @@ You can also install a specific version:
 ### Option 2: Build locally
 
 ```bash
-go build -o ge ./cmd/ge
-mv ./ge /usr/local/bin/ge
+mkdir -p ./bin
+go build -o ./bin/ge ./cmd/ge
+mv ./bin/ge /usr/local/bin/ge
 ge --help
 ```
 
@@ -160,10 +161,6 @@ ge search -q src --only-dirs
 ```bash
 # One-shot watch on a root
 ge watch --root "$HOME"
-
-# install/start persistent user watcher
-ge watch install --root "$HOME"
-ge watch start
 ```
 
 Windows supports foreground watch:
@@ -172,8 +169,8 @@ Windows supports foreground watch:
 ge watch --root $env:USERPROFILE
 ```
 
-macOS uses a LaunchAgent and Linux uses a `systemd --user` service for persistent watching. On Linux systems without a
-user systemd session, use the foreground watcher command instead. Windows supports foreground watch only.
+The watcher stays in the foreground. If a persistent watcher is needed, manage it with the native service tooling for
+the target operating system.
 
 ### Rebuild search index (without rescanning)
 
@@ -271,10 +268,12 @@ ge scan \
 ### Database migrations
 
 ```bash
-ge db migrate
 ge db status
 ge db version
 ```
+
+Migrations run automatically when the database is opened. Existing databases using the compatible
+`goose_db_version` table are resumed without destructive resets; rollback is not supported.
 
 ---
 

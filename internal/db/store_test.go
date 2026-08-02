@@ -40,7 +40,7 @@ func TestStoreSearchFTSAndWildcard(t *testing.T) {
 		t.Fatalf("upsert: %v", err)
 	}
 
-	res, err := store.Search(ctx, "my_rep", 10, 0)
+	res, err := store.SearchAdvanced(ctx, SearchOptions{Query: "my_rep", Limit: 10, Offset: 0})
 	if err != nil {
 		t.Fatalf("fts search: %v", err)
 	}
@@ -48,7 +48,7 @@ func TestStoreSearchFTSAndWildcard(t *testing.T) {
 		t.Fatalf("unexpected fts results: %+v", res)
 	}
 
-	res, err = store.Search(ctx, "*report*", 10, 0)
+	res, err = store.SearchAdvanced(ctx, SearchOptions{Query: "*report*", Limit: 10, Offset: 0})
 	if err != nil {
 		t.Fatalf("wildcard search: %v", err)
 	}
@@ -97,7 +97,7 @@ func TestStoreSearchAdvancedFiltersAndReindex(t *testing.T) {
 	if err := store.ReindexFTS(ctx); err != nil {
 		t.Fatalf("reindex fts: %v", err)
 	}
-	got, err = store.Search(ctx, "main", 10, 0)
+	got, err = store.SearchAdvanced(ctx, SearchOptions{Query: "main", Limit: 10, Offset: 0})
 	if err != nil {
 		t.Fatalf("search after reindex: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestStoreDeleteByPrefixRemovesNestedDescendants(t *testing.T) {
 		t.Fatalf("delete by prefix: %v", err)
 	}
 
-	got, err := store.Search(ctx, "main", 10, 0)
+	got, err := store.SearchAdvanced(ctx, SearchOptions{Query: "main", Limit: 10, Offset: 0})
 	if err != nil {
 		t.Fatalf("search deleted nested file: %v", err)
 	}
@@ -364,7 +364,7 @@ func TestStoreDeleteByPrefixRemovesNestedDescendants(t *testing.T) {
 		t.Fatalf("expected nested descendant to be deleted, got %+v", got)
 	}
 
-	got, err = store.Search(ctx, "index", 10, 0)
+	got, err = store.SearchAdvanced(ctx, SearchOptions{Query: "index", Limit: 10, Offset: 0})
 	if err != nil {
 		t.Fatalf("search kept file: %v", err)
 	}
@@ -410,7 +410,7 @@ func TestStoreFinishScanPrunesMissingAndKeepsProtectedPrefixes(t *testing.T) {
 	}
 
 	for query, want := range map[string]int{"keep": 1, "secret": 1, "stale": 0} {
-		got, err := store.Search(ctx, query, 10, 0)
+		got, err := store.SearchAdvanced(ctx, SearchOptions{Query: query, Limit: 10, Offset: 0})
 		if err != nil {
 			t.Fatalf("search %q: %v", query, err)
 		}
@@ -486,7 +486,7 @@ func TestStoreMigratesLegacySchema(t *testing.T) {
 		t.Fatalf("legacy path column should not exist after migration")
 	}
 
-	got, err := store.Search(ctx, "main", 10, 0)
+	got, err := store.SearchAdvanced(ctx, SearchOptions{Query: "main", Limit: 10, Offset: 0})
 	if err != nil {
 		t.Fatalf("search migrated db: %v", err)
 	}

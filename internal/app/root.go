@@ -99,17 +99,17 @@ func NewRootCommand() *cobra.Command {
 
 	cmd.PersistentFlags().StringVar(&opt.DBPath, "db", "", "Path to SQLite database")
 
-	cmd.AddCommand(newScanCommand(&opt, &cfg))
+	cmd.AddCommand(newScanCommand(&opt))
 	cmd.AddCommand(newReindexCommand(&opt))
 	cmd.AddCommand(newSearchCommand(&opt))
 	cmd.AddCommand(newDBCommand(&opt))
-	cmd.AddCommand(newWatchCommand(&opt, &cfg))
+	cmd.AddCommand(newWatchCommand(&opt))
 	cmd.AddCommand(newRootsCommand())
 
 	return cmd
 }
 
-func newScanCommand(opt *options, cfg *config.Config) *cobra.Command {
+func newScanCommand(opt *options) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "scan",
 		Short: "Scan filesystem roots and update index",
@@ -139,7 +139,7 @@ func newScanCommand(opt *options, cfg *config.Config) *cobra.Command {
 			}
 
 			r := scanner.Runner{
-				Indexer: store,
+				Store:   store,
 				Workers: opt.Workers,
 				Batch:   opt.Batch,
 				Exclude: opt.Exclude,
@@ -255,10 +255,11 @@ func newSearchCommand(opt *options) *cobra.Command {
 	return command
 }
 
-func newWatchCommand(opt *options, cfg *config.Config) *cobra.Command {
+func newWatchCommand(opt *options) *cobra.Command {
 	command := &cobra.Command{
 		Use:   "watch",
 		Short: "Watch indexed root for real-time updates",
+		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			store, err := db.Open(cmd.Context(), opt.DBPath)
 			if err != nil {
@@ -284,14 +285,6 @@ func newWatchCommand(opt *options, cfg *config.Config) *cobra.Command {
 	}
 	command.PersistentFlags().StringVar(&opt.Root, "root", "", "Filesystem root to watch (default: home directory)")
 
-	command.AddCommand(newWatchInstallCommand(opt))
-	command.AddCommand(newWatchUninstallCommand())
-	command.AddCommand(newWatchStartCommand())
-	command.AddCommand(newWatchStopCommand())
-	command.AddCommand(newWatchRestartCommand())
-	command.AddCommand(newWatchStatusCommand())
-	command.AddCommand(newWatchLogsCommand())
-
 	return command
 }
 
@@ -313,19 +306,6 @@ func newDBCommand(opt *options) *cobra.Command {
 		Use:   "db",
 		Short: "Database migration and schema commands",
 	}
-
-	command.AddCommand(&cobra.Command{
-		Use:   "migrate",
-		Short: "Apply all pending DB migrations",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			version, err := db.Migrate(cmd.Context(), opt.DBPath)
-			if err != nil {
-				return err
-			}
-			fmt.Printf("migrations_applied current_version=%d\n", version)
-			return nil
-		},
-	})
 
 	command.AddCommand(&cobra.Command{
 		Use:   "version",

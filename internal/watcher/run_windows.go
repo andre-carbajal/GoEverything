@@ -131,7 +131,7 @@ func (w *Watcher) applyWindowsNotifications(ctx context.Context, root string, bu
 	return nil
 }
 
-func upsertChangedPath(ctx context.Context, store IndexStore, root, path string) error {
+func upsertChangedPath(ctx context.Context, store *db.Store, root, path string) error {
 	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {

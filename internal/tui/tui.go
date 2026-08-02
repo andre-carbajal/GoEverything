@@ -1975,7 +1975,7 @@ func reindexCmd(ctx context.Context, cfg config.Config, roots []string, progress
 			return reindexDoneMsg{err: err}
 		}
 		r := scanner.Runner{
-			Indexer:  store,
+			Store:    store,
 			Workers:  scanner.DefaultWorkerCount(),
 			Batch:    2000,
 			Exclude:  cfg.Excludes,
@@ -1995,7 +1995,7 @@ func scanRootsCmd(ctx context.Context, cfg config.Config, roots []string, label 
 		defer func() { _ = store.Close() }()
 
 		r := scanner.Runner{
-			Indexer:  store,
+			Store:    store,
 			Workers:  scanner.DefaultWorkerCount(),
 			Batch:    2000,
 			Exclude:  cfg.Excludes,

@@ -47,7 +47,7 @@ func TestRunnerPrunesDeletedFileAfterRescan(t *testing.T) {
 		t.Fatalf("write target: %v", err)
 	}
 
-	r := Runner{Indexer: store, Backend: BackendWalk, Batch: 2}
+	r := Runner{Store: store, Backend: BackendWalk, Batch: 2}
 	if _, err := r.Scan(ctx, []string{root}); err != nil {
 		t.Fatalf("first scan: %v", err)
 	}
@@ -78,7 +78,7 @@ func TestRunnerPrunesDeletedDirectoryAfterRescan(t *testing.T) {
 		t.Fatalf("write nested file: %v", err)
 	}
 
-	r := Runner{Indexer: store, Backend: BackendWalk, Batch: 2}
+	r := Runner{Store: store, Backend: BackendWalk, Batch: 2}
 	if _, err := r.Scan(ctx, []string{root}); err != nil {
 		t.Fatalf("first scan: %v", err)
 	}
@@ -109,12 +109,12 @@ func TestRunnerPrunesNewlyExcludedPathsAfterRescan(t *testing.T) {
 		t.Fatalf("write excluded file: %v", err)
 	}
 
-	if _, err := (Runner{Indexer: store, Backend: BackendWalk, Batch: 2}).Scan(ctx, []string{root}); err != nil {
+	if _, err := (Runner{Store: store, Backend: BackendWalk, Batch: 2}).Scan(ctx, []string{root}); err != nil {
 		t.Fatalf("first scan: %v", err)
 	}
 	assertSearchCount(t, store, "old-cache", 1)
 
-	if _, err := (Runner{Indexer: store, Backend: BackendWalk, Batch: 2, Exclude: []string{"excluded"}}).Scan(ctx, []string{root}); err != nil {
+	if _, err := (Runner{Store: store, Backend: BackendWalk, Batch: 2, Exclude: []string{"excluded"}}).Scan(ctx, []string{root}); err != nil {
 		t.Fatalf("excluded scan: %v", err)
 	}
 	assertSearchCount(t, store, "old-cache", 0)
@@ -134,7 +134,7 @@ func TestRunnerDoesNotPruneWhenCanceled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := (Runner{Indexer: store, Backend: BackendWalk}).Scan(ctx, []string{root})
+	_, err := (Runner{Store: store, Backend: BackendWalk}).Scan(ctx, []string{root})
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected context.Canceled, got %v", err)
 	}
@@ -153,7 +153,7 @@ func TestRunnerDoesNotPruneWhenScanErrors(t *testing.T) {
 		t.Fatalf("upsert stale entry: %v", err)
 	}
 
-	_, err := (Runner{Indexer: store, Backend: BackendWalk}).Scan(context.Background(), []string{root})
+	_, err := (Runner{Store: store, Backend: BackendWalk}).Scan(context.Background(), []string{root})
 	if err == nil {
 		t.Fatalf("expected scan error")
 	}
@@ -182,7 +182,7 @@ func TestRunnerPublishesRecursiveDirectorySizes(t *testing.T) {
 
 	store := openTestStore(t)
 	defer func() { _ = store.Close() }()
-	if _, err := (Runner{Indexer: store, Backend: BackendWalk, Batch: 2}).Scan(ctx, []string{root}); err != nil {
+	if _, err := (Runner{Store: store, Backend: BackendWalk, Batch: 2}).Scan(ctx, []string{root}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 
@@ -213,7 +213,7 @@ func TestRunnerDirectorySizesRespectExclusions(t *testing.T) {
 
 	store := openTestStore(t)
 	defer func() { _ = store.Close() }()
-	if _, err := (Runner{Indexer: store, Backend: BackendWalk, Exclude: []string{"excluded"}}).Scan(context.Background(), []string{root}); err != nil {
+	if _, err := (Runner{Store: store, Backend: BackendWalk, Exclude: []string{"excluded"}}).Scan(context.Background(), []string{root}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	if got := findEntry(t, store, root).Size; got != 4 {
@@ -236,7 +236,7 @@ func TestRunnerDirectorySizesCountHardlinksByIndexedPath(t *testing.T) {
 
 	store := openTestStore(t)
 	defer func() { _ = store.Close() }()
-	if _, err := (Runner{Indexer: store, Backend: BackendWalk}).Scan(context.Background(), []string{root}); err != nil {
+	if _, err := (Runner{Store: store, Backend: BackendWalk}).Scan(context.Background(), []string{root}); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
 	if got := findEntry(t, store, root).Size; got != 12 {
@@ -261,7 +261,7 @@ func TestRunnerDoesNotPublishDirectorySizesWhenCanceled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if _, err := (Runner{Indexer: store, Backend: BackendWalk}).Scan(ctx, []string{root}); !errors.Is(err, context.Canceled) {
+	if _, err := (Runner{Store: store, Backend: BackendWalk}).Scan(ctx, []string{root}); !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected cancellation, got %v", err)
 	}
 	if got := findEntry(t, store, root).Size; got != 99 {
@@ -282,7 +282,7 @@ func openTestStore(t *testing.T) *db.Store {
 func assertSearchCount(t *testing.T, store *db.Store, query string, want int) {
 	t.Helper()
 
-	got, err := store.Search(context.Background(), query, 10, 0)
+	got, err := store.SearchAdvanced(context.Background(), db.SearchOptions{Query: query, Limit: 10, Offset: 0})
 	if err != nil {
 		t.Fatalf("search %q: %v", query, err)
 	}

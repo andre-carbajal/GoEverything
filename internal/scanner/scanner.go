@@ -16,24 +16,8 @@ import (
 	"goeverything/internal/db"
 )
 
-type Indexer interface {
-	UpsertBatch(ctx context.Context, entries []db.Entry) error
-}
-
-type DirectorySizeUpdater interface {
-	UpdateDirectorySizes(ctx context.Context, sizes map[string]int64) error
-}
-
-type Reconciler interface {
-	BeginScan(ctx context.Context, roots []string) (int64, error)
-	MarkSeenBatch(ctx context.Context, sessionID int64, entries []db.Entry) error
-	MarkUnreadablePrefix(ctx context.Context, sessionID int64, path string) error
-	FinishScan(ctx context.Context, sessionID int64, roots []string) error
-	AbortScan(ctx context.Context, sessionID int64) error
-}
-
 type Runner struct {
-	Indexer Indexer
+	Store   *db.Store
 	Workers int
 	Batch   int
 	Exclude []string
@@ -163,31 +147,26 @@ func DefaultWorkerCount() int {
 
 func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 	start := time.Now()
-	if r.Indexer == nil {
-		return Metrics{}, errors.New("indexer is required")
+	if r.Store == nil {
+		return Metrics{}, errors.New("store is required")
 	}
 	if len(roots) == 0 {
 		return Metrics{}, errors.New("at least one root is required")
 	}
 	roots = cleanRoots(roots)
 
-	reconciler, reconcile := r.Indexer.(Reconciler)
-	sessionID := int64(0)
-	if reconcile {
-		id, err := reconciler.BeginScan(ctx, roots)
-		if err != nil {
-			return Metrics{}, err
-		}
-		sessionID = id
-		defer func() {
-			if sessionID == 0 {
-				return
-			}
-			cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			_ = reconciler.AbortScan(cleanupCtx, sessionID)
-		}()
+	sessionID, err := r.Store.BeginScan(ctx, roots)
+	if err != nil {
+		return Metrics{}, err
 	}
+	defer func() {
+		if sessionID == 0 {
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = r.Store.AbortScan(cleanupCtx, sessionID)
+	}()
 
 	batchSize := r.Batch
 	if batchSize <= 0 {
@@ -237,13 +216,11 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 			if len(batch) == 0 {
 				return nil
 			}
-			if err := r.Indexer.UpsertBatch(ctx, batch); err != nil {
+			if err := r.Store.UpsertBatch(ctx, batch); err != nil {
 				return err
 			}
-			if reconcile {
-				if err := reconciler.MarkSeenBatch(ctx, sessionID, batch); err != nil {
-					return err
-				}
+			if err := r.Store.MarkSeenBatch(ctx, sessionID, batch); err != nil {
+				return err
 			}
 			atomic.AddInt64(&indexed, int64(len(batch)))
 			batch = batch[:0]
@@ -330,29 +307,25 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 	if elapsed > 0 {
 		metrics.FilesPerSecond = float64(metrics.Scanned) / elapsed.Seconds()
 	}
-	if reconcile {
-		protectedMu.Lock()
-		protectedPaths := make([]string, 0, len(protected))
-		for path := range protected {
-			protectedPaths = append(protectedPaths, path)
-		}
-		protectedMu.Unlock()
-
-		for _, path := range protectedPaths {
-			if err := reconciler.MarkUnreadablePrefix(ctx, sessionID, path); err != nil {
-				return Metrics{}, err
-			}
-		}
-		if err := reconciler.FinishScan(ctx, sessionID, roots); err != nil {
-			return Metrics{}, err
-		}
-		sessionID = 0
+	protectedMu.Lock()
+	protectedPaths := make([]string, 0, len(protected))
+	for path := range protected {
+		protectedPaths = append(protectedPaths, path)
 	}
+	protectedMu.Unlock()
 
-	if updater, ok := r.Indexer.(DirectorySizeUpdater); ok {
-		if err := updater.UpdateDirectorySizes(ctx, sizes.snapshot()); err != nil {
+	for _, path := range protectedPaths {
+		if err := r.Store.MarkUnreadablePrefix(ctx, sessionID, path); err != nil {
 			return Metrics{}, err
 		}
+	}
+	if err := r.Store.FinishScan(ctx, sessionID, roots); err != nil {
+		return Metrics{}, err
+	}
+	sessionID = 0
+
+	if err := r.Store.UpdateDirectorySizes(ctx, sizes.snapshot()); err != nil {
+		return Metrics{}, err
 	}
 
 	emitProgress()
