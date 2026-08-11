@@ -91,7 +91,7 @@ func TestUsageNavigationStaysWithinScannedRoot(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{DBPath: "/tmp/test.db", Theme: "tokyonight"})
-	root := "/tmp/root"
+	root := filepath.Join(string(filepath.Separator), "tmp", "root")
 	m.activeScanRoot = root
 	m.mode = viewSearch
 
@@ -139,7 +139,7 @@ func TestUsageViewShowsBackRowOnlyBelowRoot(t *testing.T) {
 	t.Parallel()
 
 	m := newTestModel(t, config.Config{DBPath: "/tmp/test.db", Theme: "tokyonight"})
-	m.usageBase = "/tmp/root"
+	m.usageBase = filepath.Join(string(filepath.Separator), "tmp", "root")
 	m.usageRoot = filepath.Join(m.usageBase, "empty")
 	if out := m.viewUsage(100, 20); !strings.Contains(out, ".. Volver") {
 		t.Fatalf("expected back row below scanned root, got:\n%s", out)
@@ -155,7 +155,7 @@ func TestUsageNavigationSupportsBackRowAndListJumps(t *testing.T) {
 
 	m := newTestModel(t, config.Config{DBPath: "/tmp/test.db", Theme: "tokyonight"})
 	m.mode = viewUsage
-	m.usageBase = "/tmp/root"
+	m.usageBase = filepath.Join(string(filepath.Separator), "tmp", "root")
 	m.usageRoot = filepath.Join(m.usageBase, "child")
 	m.usageItems = make([]db.Entry, 30)
 
@@ -188,13 +188,13 @@ func TestUsageViewScrollsFromItem24To25WithoutClippingBorder(t *testing.T) {
 
 	m := newTestModel(t, config.Config{DBPath: "/tmp/test.db", Theme: "tokyonight"})
 	m.mode = viewUsage
-	m.usageBase = "/tmp/root"
+	m.usageBase = filepath.Join(string(filepath.Separator), "tmp", "root")
 	m.usageRoot = m.usageBase
 	m.usageTotal = 465
 	for i := 1; i <= 30; i++ {
 		m.usageItems = append(m.usageItems, db.Entry{
 			Name:  fmt.Sprintf("item-%02d", i),
-			Path:  fmt.Sprintf("/tmp/root/item-%02d", i),
+			Path:  filepath.Join(m.usageRoot, fmt.Sprintf("item-%02d", i)),
 			Size:  int64(31 - i),
 			IsDir: true,
 		})
