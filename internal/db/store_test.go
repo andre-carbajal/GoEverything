@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -246,6 +247,50 @@ func TestStoreUpdateDirectorySizesBatch(t *testing.T) {
 		if got.Size != want {
 			t.Fatalf("directory %q size: want %d, got %d", path, want, got.Size)
 		}
+	}
+}
+
+func TestStoreTopEntries(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "usage.db"))
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() { _ = store.Close() }()
+
+	root := testPath("usage", "root")
+	large := filepath.Join(root, "large")
+	small := filepath.Join(root, "small")
+	nested := filepath.Join(large, "nested")
+	file := filepath.Join(root, "archive.bin")
+	entries := []Entry{
+		NewEntryFromPath(root, root, 0, time.Now(), true),
+		NewEntryFromPath(root, large, 0, time.Now(), true),
+		NewEntryFromPath(root, small, 0, time.Now(), true),
+		NewEntryFromPath(root, nested, 0, time.Now(), true),
+		NewEntryFromPath(root, file, 90, time.Now(), false),
+	}
+	for i := 1; i <= 13; i++ {
+		entries = append(entries, NewEntryFromPath(root, filepath.Join(root, fmt.Sprintf("extra-%02d.bin", i)), int64(i), time.Now(), false))
+	}
+	if err := store.UpsertBatch(ctx, entries); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	if err := store.UpdateDirectorySizes(ctx, map[string]int64{root: 281, large: 80, small: 20, nested: 80}); err != nil {
+		t.Fatalf("update sizes: %v", err)
+	}
+
+	total, got, err := store.TopEntries(ctx, root)
+	if err != nil {
+		t.Fatalf("top entries: %v", err)
+	}
+	if total != 281 {
+		t.Fatalf("root size: want 281, got %d", total)
+	}
+	if len(got) != 16 || got[0].Path != file || got[1].Path != large || got[2].Path != small {
+		t.Fatalf("unexpected direct entries: %+v", got)
 	}
 }
 

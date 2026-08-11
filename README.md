@@ -95,6 +95,7 @@ Useful shortcuts:
 - In the location picker, `↑` / `↓` select suggestions and `Tab` / `→` accept completion
 - In the location picker, `Enter` scans the selected root/path and `Esc` cancels
 - `Enter` open selected result
+- `Ctrl+U` open the disk-usage view; `Enter`/`→` opens files or drills into directories and `h`/`←` goes back
 - `Ctrl+D` / `Delete` remove selected result
 - Click select, double-click open, right-click delete
 - `Ctrl+G` scan now

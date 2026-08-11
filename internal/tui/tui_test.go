@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
@@ -83,6 +84,151 @@ func TestFormatBytesIncludesDirectorySizes(t *testing.T) {
 	})
 	if values[0] != "dir" || values[3] != "0 B" {
 		t.Fatalf("unexpected directory row: %#v", values)
+	}
+}
+
+func TestUsageNavigationStaysWithinScannedRoot(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(t, config.Config{DBPath: "/tmp/test.db", Theme: "tokyonight"})
+	root := "/tmp/root"
+	m.activeScanRoot = root
+	m.mode = viewSearch
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyCtrlU})
+	next := updated.(model)
+	if next.mode != viewUsage || next.usageRoot != root || next.usageBase != root {
+		t.Fatalf("expected usage view at %q, got mode=%v root=%q base=%q", root, next.mode, next.usageRoot, next.usageBase)
+	}
+
+	next.usageBusy = false
+	next.usageItems = []db.Entry{{Name: "child", Path: filepath.Join(root, "child"), IsDir: true}}
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next = updated.(model)
+	if next.usageRoot != filepath.Join(root, "child") {
+		t.Fatalf("expected drill-down path, got %q", next.usageRoot)
+	}
+
+	next.usageBusy = false
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyLeft})
+	next = updated.(model)
+	if next.usageRoot != root {
+		t.Fatalf("expected parent path, got %q", next.usageRoot)
+	}
+}
+
+func TestUsageViewShowsFilesWithoutSelectionBackground(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(t, config.Config{DBPath: "/tmp/test.db", Theme: "tokyonight"})
+	m.usageTotal = 100
+	m.usageItems = []db.Entry{
+		{Name: "folder", Path: "/tmp/folder", Size: 60, IsDir: true},
+		{Name: "file.bin", Path: "/tmp/file.bin", Size: 40},
+	}
+	out := m.viewUsage(100, 20)
+	if !strings.Contains(out, "[D]") || !strings.Contains(out, "[F]") {
+		t.Fatalf("expected directory and file markers, got:\n%s", out)
+	}
+	if strings.Contains(out, "\x1b[48;") {
+		t.Fatalf("selection should not paint a full-width background, got:\n%s", out)
+	}
+}
+
+func TestUsageViewShowsBackRowOnlyBelowRoot(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(t, config.Config{DBPath: "/tmp/test.db", Theme: "tokyonight"})
+	m.usageBase = "/tmp/root"
+	m.usageRoot = filepath.Join(m.usageBase, "empty")
+	if out := m.viewUsage(100, 20); !strings.Contains(out, ".. Volver") {
+		t.Fatalf("expected back row below scanned root, got:\n%s", out)
+	}
+	m.usageRoot = m.usageBase
+	if out := m.viewUsage(100, 20); strings.Contains(out, ".. Volver") {
+		t.Fatalf("did not expect back row at scanned root, got:\n%s", out)
+	}
+}
+
+func TestUsageNavigationSupportsBackRowAndListJumps(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(t, config.Config{DBPath: "/tmp/test.db", Theme: "tokyonight"})
+	m.mode = viewUsage
+	m.usageBase = "/tmp/root"
+	m.usageRoot = filepath.Join(m.usageBase, "child")
+	m.usageItems = make([]db.Entry, 30)
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	next := updated.(model)
+	if next.usageRoot != m.usageBase {
+		t.Fatalf("expected Enter on back row to return to %q, got %q", m.usageBase, next.usageRoot)
+	}
+
+	m.usageRoot = m.usageBase
+	updated, _ = m.Update(tea.KeyMsg{Type: tea.KeyEnd})
+	next = updated.(model)
+	if next.usageCur != 29 {
+		t.Fatalf("expected End to select last item, got %d", next.usageCur)
+	}
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyHome})
+	next = updated.(model)
+	if next.usageCur != 0 {
+		t.Fatalf("expected Home to select first item, got %d", next.usageCur)
+	}
+	updated, _ = next.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	next = updated.(model)
+	if next.usageCur <= 0 || next.usageCur >= len(next.usageItems) {
+		t.Fatalf("expected PageDown to move within list, got %d", next.usageCur)
+	}
+}
+
+func TestUsageViewScrollsFromItem24To25WithoutClippingBorder(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(t, config.Config{DBPath: "/tmp/test.db", Theme: "tokyonight"})
+	m.mode = viewUsage
+	m.usageBase = "/tmp/root"
+	m.usageRoot = m.usageBase
+	m.usageTotal = 465
+	for i := 1; i <= 30; i++ {
+		m.usageItems = append(m.usageItems, db.Entry{
+			Name:  fmt.Sprintf("item-%02d", i),
+			Path:  fmt.Sprintf("/tmp/root/item-%02d", i),
+			Size:  int64(31 - i),
+			IsDir: true,
+		})
+	}
+	m.usageCur = 23
+
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+	next := updated.(model)
+	if next.usageCur != 24 {
+		t.Fatalf("expected cursor on item 25, got %d", next.usageCur+1)
+	}
+
+	out := next.viewUsage(120, 32)
+	if !strings.Contains(out, "item-25") || strings.Contains(out, "item-01") {
+		t.Fatalf("expected viewport to advance from item 24 to 25, got:\n%s", out)
+	}
+	if got := maxRenderedLineWidth(out); got > 120 {
+		t.Fatalf("usage panel exceeded width 120: got %d\n%s", got, out)
+	}
+	lines := strings.Split(out, "\n")
+	if len(lines) != 32 || !strings.Contains(lines[len(lines)-1], "╰") || !strings.Contains(lines[len(lines)-1], "╯") {
+		t.Fatalf("expected complete bottom border at height 32, got:\n%s", out)
+	}
+}
+
+func TestUsageViewFitsNarrowWidth(t *testing.T) {
+	t.Parallel()
+
+	m := newTestModel(t, config.Config{DBPath: "/tmp/test.db", Theme: "tokyonight"})
+	m.usageTotal = 100
+	m.usageItems = []db.Entry{{Name: "very-long-directory-name", Size: 100, IsDir: true}}
+	out := m.viewUsage(36, 14)
+	if got := maxRenderedLineWidth(out); got > 36 {
+		t.Fatalf("usage panel exceeded narrow width 36: got %d\n%s", got, out)
 	}
 }
 

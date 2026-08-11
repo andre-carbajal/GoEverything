@@ -895,6 +895,44 @@ func (s *Store) Count(ctx context.Context) (int64, error) {
 	return total, err
 }
 
+// TopEntries returns the aggregate size of root and its largest direct children.
+func (s *Store) TopEntries(ctx context.Context, root string) (int64, []Entry, error) {
+	root = filepath.Clean(strings.TrimSpace(root))
+	if root == "" || root == "." {
+		return 0, nil, errors.New("root is required")
+	}
+
+	dirPath, baseName := splitPath(root)
+	var total int64
+	err := s.db.QueryRowContext(ctx, `
+		SELECT COALESCE(e.size, 0)
+		FROM entries AS e
+		JOIN directories AS d ON d.id = e.dir_id
+		WHERE d.path = ? AND e.name = ? AND e.is_dir = 1`, dirPath, baseName).Scan(&total)
+	if errors.Is(err, sql.ErrNoRows) {
+		total = 0
+	} else if err != nil {
+		return 0, nil, err
+	}
+
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT e.name, d.path, e.ext, e.size, e.mtime, e.is_dir, e.root, e.indexed_at
+		FROM entries AS e
+		JOIN directories AS d ON d.id = e.dir_id
+		WHERE d.path = ?
+		ORDER BY e.size DESC, e.name ASC`, root)
+	if err != nil {
+		return 0, nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	entries, err := scanEntries(rows, 0)
+	if err != nil {
+		return 0, nil, err
+	}
+	return total, entries, nil
+}
+
 func buildFTSQuery(query string) string {
 	parts := strings.Fields(strings.TrimSpace(query))
 	if len(parts) == 0 {

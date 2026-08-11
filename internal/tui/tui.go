@@ -30,6 +30,7 @@ const (
 	viewLocation viewMode = iota
 	viewStartup
 	viewSearch
+	viewUsage
 	viewConfig
 )
 
@@ -50,6 +51,14 @@ type searchDoneMsg struct {
 
 type countDoneMsg struct {
 	total int64
+	err   error
+}
+
+type usageDoneMsg struct {
+	seq   int
+	root  string
+	total int64
+	items []db.Entry
 	err   error
 }
 
@@ -181,6 +190,14 @@ type model struct {
 	searchSeq   int
 	searchRes   []db.Entry
 	searchCur   int
+
+	usageRoot  string
+	usageBase  string
+	usageTotal int64
+	usageItems []db.Entry
+	usageCur   int
+	usageSeq   int
+	usageBusy  bool
 
 	deleteIndex     int
 	deleteTarget    db.Entry
@@ -836,6 +853,8 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		case viewStartup:
 		case viewSearch:
 			m = m.scrollSearchResults(delta)
+		case viewUsage:
+			m.usageCur = min(max(0, m.usageCur+delta), max(0, m.usageRowCount()-1))
 		case viewConfig:
 			m = m.scrollConfig(delta)
 		}
@@ -923,6 +942,17 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else {
 			m.err = msg.err
 		}
+		return m, nil
+
+	case usageDoneMsg:
+		if msg.seq != m.usageSeq || msg.root != m.usageRoot {
+			return m, nil
+		}
+		m.usageBusy = false
+		m.usageTotal = msg.total
+		m.usageItems = msg.items
+		m.usageCur = min(m.usageCur, max(0, len(m.usageItems)-1))
+		m.err = msg.err
 		return m, nil
 
 	case openDoneMsg:
@@ -1069,6 +1099,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m = m.openSettingsView()
 				return m, nil
 			}
+		case "ctrl+u":
+			if m.mode == viewSearch && !m.busy {
+				return m.openUsageView()
+			}
 		case "esc":
 			if m.mode == viewConfig {
 				m = m.focusSearchView()
@@ -1081,6 +1115,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateLocation(msg)
 		case viewSearch:
 			return m.updateSearch(msg)
+		case viewUsage:
+			return m.updateUsage(msg)
 		case viewConfig:
 			return m.updateConfig(msg)
 		case viewStartup:
@@ -1089,6 +1125,115 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return m, nil
+}
+
+func (m model) openUsageView() (model, tea.Cmd) {
+	root := filepath.Clean(strings.TrimSpace(m.activeScanRoot))
+	if root == "" || root == "." {
+		m.err = errors.New("scan a location before opening disk usage")
+		return m, nil
+	}
+	m.mode = viewUsage
+	m.searchInput.Blur()
+	m.searchTable.Blur()
+	m.usageBase = root
+	m.usageRoot = root
+	m.usageCur = 0
+	m.usageItems = nil
+	m.usageTotal = 0
+	m.usageSeq++
+	m.usageBusy = true
+	m.err = nil
+	m.status = "loading disk usage…"
+	return m, usageCmd(m.ctx, m.cfg.DBPath, root, m.usageSeq)
+}
+
+func (m model) loadUsage(root string) (model, tea.Cmd) {
+	root = filepath.Clean(strings.TrimSpace(root))
+	if !pathWithin(m.usageBase, root) {
+		return m, nil
+	}
+	m.usageRoot = root
+	m.usageCur = 0
+	m.usageItems = nil
+	m.usageTotal = 0
+	m.usageSeq++
+	m.usageBusy = true
+	m.err = nil
+	m.status = "loading disk usage…"
+	return m, usageCmd(m.ctx, m.cfg.DBPath, root, m.usageSeq)
+}
+
+func (m model) updateUsage(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	lastRow := max(0, m.usageRowCount()-1)
+	page := max(1, m.contentHeight()-8)
+	switch msg.String() {
+	case "esc":
+		return m.focusSearchView(), nil
+	case "up", "k":
+		m.usageCur = max(0, m.usageCur-1)
+	case "down", "j":
+		m.usageCur = min(lastRow, m.usageCur+1)
+	case "home":
+		m.usageCur = 0
+	case "end":
+		m.usageCur = lastRow
+	case "pgup":
+		m.usageCur = max(0, m.usageCur-page)
+	case "pgdown":
+		m.usageCur = min(lastRow, m.usageCur+page)
+	case "enter", "right", "l":
+		if !m.usageBusy && m.usageHasParent() && m.usageCur == 0 {
+			return m.loadUsage(filepath.Dir(m.usageRoot))
+		}
+		if !m.usageBusy {
+			entry, ok := m.selectedUsageItem()
+			if !ok {
+				return m, nil
+			}
+			if entry.IsDir {
+				return m.loadUsage(entry.Path)
+			}
+			return m, openCmd(entry.Path, true)
+		}
+	case "left", "h", "backspace":
+		if !m.usageBusy && filepath.Clean(m.usageRoot) != filepath.Clean(m.usageBase) {
+			return m.loadUsage(filepath.Dir(m.usageRoot))
+		}
+	}
+	return m, nil
+}
+
+func (m model) usageHasParent() bool {
+	return filepath.Clean(m.usageRoot) != filepath.Clean(m.usageBase)
+}
+
+func (m model) usageRowCount() int {
+	if m.usageHasParent() {
+		return len(m.usageItems) + 1
+	}
+	return len(m.usageItems)
+}
+
+func (m model) selectedUsageItem() (db.Entry, bool) {
+	index := m.usageCur
+	if m.usageHasParent() {
+		index--
+	}
+	if index < 0 || index >= len(m.usageItems) {
+		return db.Entry{}, false
+	}
+	return m.usageItems[index], true
+}
+
+func pathWithin(root, path string) bool {
+	root = filepath.Clean(root)
+	path = filepath.Clean(path)
+	if root == path {
+		return true
+	}
+	rel, err := filepath.Rel(root, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 func (m model) updateSearch(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1351,6 +1496,8 @@ func (m model) renderContent(width, height int) string {
 		content = m.viewStartup(width, height)
 	case viewSearch:
 		content = m.viewSearch(width, height)
+	case viewUsage:
+		content = m.viewUsage(width, height)
 	case viewConfig:
 		content = m.viewConfig(width, height)
 	}
@@ -1375,8 +1522,10 @@ func (m model) renderHelp() string {
 		keys = "ctrl+x cancel • ctrl+q quit"
 	} else if m.mode == viewConfig {
 		keys = "j/k or wheel move • click edit/toggle • right-click exclude removes • a add • d remove • esc search • ctrl+q quit"
+	} else if m.mode == viewUsage {
+		keys = "j/k or wheel move • home/end/page jump • enter/right open • h/left/backspace up • esc search • ctrl+q quit"
 	} else if m.mode == viewSearch {
-		keys = "↑/↓ or mouse move • enter/double-click open • ctrl+d/delete/right-click delete • ctrl+q quit"
+		keys = "↑/↓ or mouse move • enter/double-click open • ctrl+u disk usage • ctrl+d/delete/right-click delete • ctrl+q quit"
 	}
 	return m.theme.Muted.Render(trimMiddle("keys: "+keys, max(20, m.width-6)))
 }
@@ -1527,6 +1676,79 @@ func (m model) viewSearch(width, height int) string {
 		Height(max(3, height-2)).
 		Render(strings.Join(lines, "\n"))
 	return card
+}
+
+func (m model) viewUsage(width, height int) string {
+	panel := m.panelStyle()
+	innerWidth := max(1, width-panel.GetHorizontalFrameSize())
+	innerHeight := max(1, height-panel.GetVerticalFrameSize())
+	root := trimMiddle(m.usageRoot, max(1, innerWidth-len("scope: ")))
+	lines := []string{
+		m.theme.Title.Render("DISK USAGE"),
+		m.theme.Muted.Render("scope: " + root),
+		m.theme.Highlight.Render("total: " + formatBytes(m.usageTotal)),
+		m.theme.Muted.Render(fmt.Sprintf("items: %d", len(m.usageItems))),
+		"",
+	}
+	if m.usageBusy {
+		lines = append(lines, m.theme.Muted.Render("Calculating directory sizes…"))
+	} else if len(m.usageItems) == 0 && !m.usageHasParent() {
+		lines = append(lines, m.theme.Muted.Render("No files or subdirectories found in this indexed location."))
+	} else {
+		lines = append(lines, m.theme.Title.Render("LARGEST ITEMS"))
+		visibleRows := max(0, innerHeight-len(lines))
+		start := 0
+		if visibleRows > 0 && m.usageCur >= visibleRows {
+			start = m.usageCur - visibleRows + 1
+		}
+		end := min(m.usageRowCount(), start+visibleRows)
+		for row := start; row < end; row++ {
+			if m.usageHasParent() && row == 0 {
+				marker := "  "
+				style := m.theme.Text
+				if m.usageCur == 0 {
+					marker = "› "
+					style = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Bold(true)
+				}
+				lines = append(lines, style.Render(marker+".. Volver"))
+				continue
+			}
+			itemIndex := row
+			if m.usageHasParent() {
+				itemIndex--
+			}
+			entry := m.usageItems[itemIndex]
+			kind := "F"
+			if entry.IsDir {
+				kind = "D"
+			}
+			percent := 0.0
+			if m.usageTotal > 0 {
+				percent = float64(entry.Size) / float64(m.usageTotal) * 100
+			}
+			marker := "  "
+			if row == m.usageCur {
+				marker = "› "
+			}
+			fixedWidth := lipgloss.Width(fmt.Sprintf("%s%2d [%s]  %10s %6.1f%% ", marker, itemIndex+1, kind, formatBytes(entry.Size), percent))
+			nameWidth := max(1, min(30, innerWidth-fixedWidth))
+			prefix := fmt.Sprintf("%s%2d [%s] %-*s %10s %6.1f%% ", marker, itemIndex+1, kind, nameWidth, trimMiddle(entry.Name, nameWidth), formatBytes(entry.Size), percent)
+			barWidth := max(0, innerWidth-lipgloss.Width(prefix))
+			filled := 0
+			if m.usageItems[0].Size > 0 {
+				filled = int(float64(barWidth) * float64(entry.Size) / float64(m.usageItems[0].Size))
+			}
+			filled = min(barWidth, max(0, filled))
+			bar := m.theme.Highlight.Render(strings.Repeat("█", filled)) + m.theme.Muted.Render(strings.Repeat("░", barWidth-filled))
+			line := m.theme.Text.Render(prefix) + bar
+			if row == m.usageCur {
+				line = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Bold(true).Render(prefix) + bar
+			}
+			lines = append(lines, line)
+		}
+	}
+	content := lipgloss.Place(innerWidth, innerHeight, lipgloss.Left, lipgloss.Top, strings.Join(lines, "\n"))
+	return panel.Render(content)
 }
 
 func (m model) renderEmptySearchResults() string {
@@ -1961,6 +2183,18 @@ func scanProgressTickCmd(session int) tea.Cmd {
 	return tea.Tick(250*time.Millisecond, func(time.Time) tea.Msg {
 		return scanProgressTickMsg{session: session}
 	})
+}
+
+func usageCmd(ctx context.Context, dbPath, root string, seq int) tea.Cmd {
+	return func() tea.Msg {
+		store, err := db.Open(ctx, dbPath)
+		if err != nil {
+			return usageDoneMsg{seq: seq, root: root, err: err}
+		}
+		defer func() { _ = store.Close() }()
+		total, items, err := store.TopEntries(ctx, root)
+		return usageDoneMsg{seq: seq, root: root, total: total, items: items, err: err}
+	}
 }
 
 func reindexCmd(ctx context.Context, cfg config.Config, roots []string, progress func(scanner.Progress)) tea.Cmd {
