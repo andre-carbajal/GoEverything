@@ -147,8 +147,14 @@ func scanNTFSVolume(ctx context.Context, plan ntfsVolumePlan, emit func(db.Entry
 	build := func(frn uint64) (string, bool) {
 		return buildNTFSPath(plan.root, frn, records, pathByFRN, map[uint64]bool{})
 	}
+	if err := emitNTFSRequestedRoots(plan.paths, emit, progress); err != nil {
+		return err
+	}
+	return emitNTFSRecords(ctx, plan.paths, records, build, emit, progress)
+}
 
-	for _, requestedRoot := range plan.paths {
+func emitNTFSRequestedRoots(roots []string, emit func(db.Entry) error, progress scanProgress) error {
+	for _, requestedRoot := range roots {
 		info, statErr := os.Stat(requestedRoot)
 		if statErr != nil {
 			continue
@@ -160,7 +166,10 @@ func scanNTFSVolume(ctx context.Context, plan ntfsVolumePlan, emit func(db.Entry
 			return err
 		}
 	}
+	return nil
+}
 
+func emitNTFSRecords(ctx context.Context, roots []string, records map[uint64]ntfsRecord, build func(uint64) (string, bool), emit func(db.Entry) error, progress scanProgress) error {
 	for frn, record := range records {
 		select {
 		case <-ctx.Done():
@@ -171,10 +180,10 @@ func scanNTFSVolume(ctx context.Context, plan ntfsVolumePlan, emit func(db.Entry
 			continue
 		}
 		path, ok := build(frn)
-		if !ok || !pathWithinAnyRoot(path, plan.paths) {
+		if !ok || !pathWithinAnyRoot(path, roots) {
 			continue
 		}
-		root := matchingRoot(path, plan.paths)
+		root := matchingRoot(path, roots)
 		if root == "" {
 			continue
 		}

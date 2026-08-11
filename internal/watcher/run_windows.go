@@ -93,26 +93,12 @@ func (w *Watcher) Run(ctx context.Context, root string) error {
 
 func (w *Watcher) applyWindowsNotifications(ctx context.Context, root string, buf []byte) error {
 	for offset := uint32(0); offset < uint32(len(buf)); {
-		if int(offset)+12 > len(buf) {
+		notification, ok := parseWindowsNotification(buf, offset)
+		if !ok {
 			return nil
 		}
-		next := *(*uint32)(unsafe.Pointer(&buf[offset]))
-		action := *(*uint32)(unsafe.Pointer(&buf[offset+4]))
-		nameLen := *(*uint32)(unsafe.Pointer(&buf[offset+8]))
-		nameStart := offset + 12
-		nameEnd := nameStart + nameLen
-		if nameEnd > uint32(len(buf)) || nameLen%2 != 0 {
-			return nil
-		}
-		nameBytes := buf[nameStart:nameEnd]
-		name := ""
-		if len(nameBytes) > 0 {
-			u16 := unsafe.Slice((*uint16)(unsafe.Pointer(&nameBytes[0])), len(nameBytes)/2)
-			name = string(utf16.Decode(u16))
-		}
-		path := filepath.Clean(filepath.Join(root, name))
-
-		switch action {
+		path := filepath.Clean(filepath.Join(root, notification.name))
+		switch notification.action {
 		case fileActionRemoved, fileActionRenamedOldName:
 			if err := deleteWatchedPathAndDescendants(ctx, w.store, path); err != nil {
 				return err
@@ -123,12 +109,40 @@ func (w *Watcher) applyWindowsNotifications(ctx context.Context, root string, bu
 			}
 		}
 
-		if next == 0 {
+		if notification.next == 0 {
 			return nil
 		}
-		offset += next
+		offset += notification.next
 	}
 	return nil
+}
+
+type windowsNotification struct {
+	next   uint32
+	action uint32
+	name   string
+}
+
+func parseWindowsNotification(buf []byte, offset uint32) (windowsNotification, bool) {
+	if int(offset)+12 > len(buf) {
+		return windowsNotification{}, false
+	}
+	notification := windowsNotification{
+		next:   *(*uint32)(unsafe.Pointer(&buf[offset])),
+		action: *(*uint32)(unsafe.Pointer(&buf[offset+4])),
+	}
+	nameLen := *(*uint32)(unsafe.Pointer(&buf[offset+8]))
+	nameStart := offset + 12
+	nameEnd := nameStart + nameLen
+	if nameEnd > uint32(len(buf)) || nameLen%2 != 0 {
+		return windowsNotification{}, false
+	}
+	nameBytes := buf[nameStart:nameEnd]
+	if len(nameBytes) > 0 {
+		u16 := unsafe.Slice((*uint16)(unsafe.Pointer(&nameBytes[0])), len(nameBytes)/2)
+		notification.name = string(utf16.Decode(u16))
+	}
+	return notification, true
 }
 
 func upsertChangedPath(ctx context.Context, store *db.Store, root, path string) error {

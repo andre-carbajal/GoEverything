@@ -45,29 +45,8 @@ func Load() (Config, error) {
 	}
 
 	cfg := defaults()
-	data, err := os.ReadFile(path)
+	data, err := readConfigData(path)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			for _, candidate := range legacyPaths() {
-				if candidate == path {
-					continue
-				}
-				data, err = os.ReadFile(candidate)
-				if err == nil {
-					// The legacy file is migrated into the portable location below.
-					break
-				}
-				if !errors.Is(err, os.ErrNotExist) {
-					return Config{}, err
-				}
-			}
-		}
-		if errors.Is(err, os.ErrNotExist) {
-			if saveErr := Save(cfg); saveErr != nil {
-				return Config{}, saveErr
-			}
-			return cfg, nil
-		}
 		return Config{}, err
 	}
 	if len(data) == 0 {
@@ -77,19 +56,54 @@ func Load() (Config, error) {
 		return cfg, nil
 	}
 
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		var old legacyConfig
-		if err2 := json.Unmarshal(data, &old); err2 != nil {
-			return Config{}, err
-		}
-		cfg = fromLegacy(old)
+	decoded, err := decodeConfig(data, cfg)
+	if err != nil {
+		return Config{}, err
 	}
+	cfg = decoded
 
 	cfg.normalize()
 	if err := Save(cfg); err != nil {
 		return Config{}, err
 	}
 	return cfg, nil
+}
+
+func readConfigData(path string) ([]byte, error) {
+	data, err := os.ReadFile(path)
+	if err == nil || !errors.Is(err, os.ErrNotExist) {
+		return data, err
+	}
+	for _, candidate := range legacyPaths() {
+		if candidate == path {
+			continue
+		}
+		data, err = os.ReadFile(candidate)
+		if err == nil {
+			// The legacy file is migrated into the portable location below.
+			return data, nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return nil, err
+		}
+	}
+	return nil, nil
+}
+
+func decodeConfig(data []byte, cfg Config) (Config, error) {
+	err := json.Unmarshal(data, &cfg)
+	if err == nil {
+		return cfg, nil
+	}
+	return decodeLegacyConfig(data, err)
+}
+
+func decodeLegacyConfig(data []byte, currentErr error) (Config, error) {
+	old := legacyConfig{}
+	if err := json.Unmarshal(data, &old); err != nil {
+		return Config{}, currentErr
+	}
+	return fromLegacy(old), nil
 }
 
 func Save(cfg Config) error {

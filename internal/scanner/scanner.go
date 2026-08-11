@@ -50,7 +50,7 @@ const (
 	BackendNTFS = "ntfs"
 )
 
-type scanBackend interface {
+type scanner interface {
 	Scan(ctx context.Context, roots []string, emit func(db.Entry) error, progress scanProgress) error
 }
 
@@ -172,168 +172,229 @@ func (r Runner) Scan(ctx context.Context, roots []string) (Metrics, error) {
 	if batchSize <= 0 {
 		batchSize = 2000
 	}
-
-	entriesCh := make(chan db.Entry, batchSize*2)
-	errCh := make(chan error, 1)
-
-	var (
-		scanned int64
-		indexed int64
-		skipped int64
-	)
-	sizes := newDirectorySizeAccumulator()
-	var currentPath atomic.Value
-	protected := make(map[string]struct{})
-	var protectedMu sync.Mutex
-
-	emitProgress := func() {
-		if r.Progress == nil {
-			return
-		}
-		elapsed := time.Since(start)
-		scannedNow := atomic.LoadInt64(&scanned)
-		progress := Progress{
-			Scanned:     scannedNow,
-			Indexed:     atomic.LoadInt64(&indexed),
-			Skipped:     atomic.LoadInt64(&skipped),
-			Elapsed:     elapsed,
-			CurrentPath: "",
-		}
-		if path, ok := currentPath.Load().(string); ok {
-			progress.CurrentPath = path
-		}
-		if elapsed > 0 {
-			progress.FilesPerSecond = float64(scannedNow) / elapsed.Seconds()
-		}
-		r.Progress(progress)
-	}
-
-	writerDone := make(chan struct{})
-	go func() {
-		defer close(writerDone)
-		batch := make([]db.Entry, 0, batchSize)
-		flush := func() error {
-			if len(batch) == 0 {
-				return nil
-			}
-			if err := r.Store.UpsertBatch(ctx, batch); err != nil {
-				return err
-			}
-			if err := r.Store.MarkSeenBatch(ctx, sessionID, batch); err != nil {
-				return err
-			}
-			atomic.AddInt64(&indexed, int64(len(batch)))
-			batch = batch[:0]
-			emitProgress()
-			return nil
-		}
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case entry, ok := <-entriesCh:
-				if !ok {
-					if err := flush(); err != nil {
-						sendErr(errCh, err)
-					}
-					return
-				}
-				batch = append(batch, entry)
-				if len(batch) >= batchSize {
-					if err := flush(); err != nil {
-						sendErr(errCh, err)
-						return
-					}
-				}
-			}
-		}
-	}()
-
-	emitEntry := func(entry db.Entry) error {
-		sizes.add(entry)
-		select {
-		case entriesCh <- entry:
-			return nil
-		case <-ctx.Done():
-			return ctx.Err()
-		}
-	}
-	progress := scanProgress{
-		Scanned:     &scanned,
-		Skipped:     &skipped,
-		CurrentPath: &currentPath,
-		Emit:        emitProgress,
-		Protect: func(path string) {
-			path = strings.TrimSpace(path)
-			if path == "" {
-				return
-			}
-			protectedMu.Lock()
-			protected[filepath.Clean(path)] = struct{}{}
-			protectedMu.Unlock()
-		},
-	}
-	if err := r.backend().Scan(ctx, roots, emitEntry, progress); err != nil {
-		close(entriesCh)
-		<-writerDone
+	result, err := r.runScanBackend(ctx, roots, sessionID, batchSize, start)
+	if err != nil {
 		return Metrics{}, err
 	}
-
-	if ctx.Err() != nil {
-		close(entriesCh)
-		<-writerDone
-		return Metrics{}, ctx.Err()
+	if err := r.finishScan(ctx, sessionID, roots, result.protectedPaths); err != nil {
+		return Metrics{}, err
 	}
+	sessionID = 0
+	if err := r.Store.UpdateDirectorySizes(ctx, result.sizes); err != nil {
+		return Metrics{}, err
+	}
+	result.emitProgress()
+	return result.metrics, nil
+}
 
-	close(entriesCh)
-	<-writerDone
+type scanRunResult struct {
+	metrics        Metrics
+	sizes          map[string]int64
+	protectedPaths []string
+	emitProgress   func()
+}
 
+type scanCollector struct {
+	start       time.Time
+	progress    func(Progress)
+	scanned     int64
+	indexed     int64
+	skipped     int64
+	currentPath atomic.Value
+	sizes       *directorySizeAccumulator
+	protected   map[string]struct{}
+	protectedMu sync.Mutex
+}
+
+func newScanCollector(start time.Time, progress func(Progress)) *scanCollector {
+	return &scanCollector{
+		start:     start,
+		progress:  progress,
+		sizes:     newDirectorySizeAccumulator(),
+		protected: make(map[string]struct{}),
+	}
+}
+
+func (c *scanCollector) emitProgress() {
+	if c.progress == nil {
+		return
+	}
+	elapsed := time.Since(c.start)
+	scanned := atomic.LoadInt64(&c.scanned)
+	progress := Progress{
+		Scanned:     scanned,
+		Indexed:     atomic.LoadInt64(&c.indexed),
+		Skipped:     atomic.LoadInt64(&c.skipped),
+		Elapsed:     elapsed,
+		CurrentPath: "",
+	}
+	if path, ok := c.currentPath.Load().(string); ok {
+		progress.CurrentPath = path
+	}
+	if elapsed > 0 {
+		progress.FilesPerSecond = float64(scanned) / elapsed.Seconds()
+	}
+	c.progress(progress)
+}
+
+func (c *scanCollector) progressState() scanProgress {
+	return scanProgress{
+		Scanned:     &c.scanned,
+		Skipped:     &c.skipped,
+		CurrentPath: &c.currentPath,
+		Emit:        c.emitProgress,
+		Protect:     c.protect,
+	}
+}
+
+func (c *scanCollector) protect(path string) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return
+	}
+	c.protectedMu.Lock()
+	c.protected[filepath.Clean(path)] = struct{}{}
+	c.protectedMu.Unlock()
+}
+
+func (c *scanCollector) emitEntry(ctx context.Context, entriesCh chan<- db.Entry, entry db.Entry) error {
+	c.sizes.add(entry)
 	select {
-	case err := <-errCh:
-		return Metrics{}, err
-	default:
+	case entriesCh <- entry:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
-	if ctx.Err() != nil {
-		return Metrics{}, ctx.Err()
-	}
-	elapsed := time.Since(start)
+}
+
+func (c *scanCollector) metrics() Metrics {
+	elapsed := time.Since(c.start)
 	metrics := Metrics{
-		Scanned: atomic.LoadInt64(&scanned),
-		Indexed: atomic.LoadInt64(&indexed),
-		Skipped: atomic.LoadInt64(&skipped),
+		Scanned: atomic.LoadInt64(&c.scanned),
+		Indexed: atomic.LoadInt64(&c.indexed),
+		Skipped: atomic.LoadInt64(&c.skipped),
 		Elapsed: elapsed,
 	}
 	if elapsed > 0 {
 		metrics.FilesPerSecond = float64(metrics.Scanned) / elapsed.Seconds()
 	}
-	protectedMu.Lock()
-	protectedPaths := make([]string, 0, len(protected))
-	for path := range protected {
-		protectedPaths = append(protectedPaths, path)
-	}
-	protectedMu.Unlock()
-
-	for _, path := range protectedPaths {
-		if err := r.Store.MarkUnreadablePrefix(ctx, sessionID, path); err != nil {
-			return Metrics{}, err
-		}
-	}
-	if err := r.Store.FinishScan(ctx, sessionID, roots); err != nil {
-		return Metrics{}, err
-	}
-	sessionID = 0
-
-	if err := r.Store.UpdateDirectorySizes(ctx, sizes.snapshot()); err != nil {
-		return Metrics{}, err
-	}
-
-	emitProgress()
-
-	return metrics, nil
+	return metrics
 }
 
-func (r Runner) backend() scanBackend {
+func (c *scanCollector) protectedPaths() []string {
+	c.protectedMu.Lock()
+	defer c.protectedMu.Unlock()
+	paths := make([]string, 0, len(c.protected))
+	for path := range c.protected {
+		paths = append(paths, path)
+	}
+	return paths
+}
+
+func (r Runner) runScanBackend(ctx context.Context, roots []string, sessionID int64, batchSize int, start time.Time) (scanRunResult, error) {
+	collector := newScanCollector(start, r.Progress)
+	entriesCh := make(chan db.Entry, batchSize*2)
+	errCh := make(chan error, 1)
+	writerDone := make(chan struct{})
+	go scanWriter{
+		ctx:          ctx,
+		store:        r.Store,
+		sessionID:    sessionID,
+		batchSize:    batchSize,
+		entries:      entriesCh,
+		errors:       errCh,
+		indexed:      &collector.indexed,
+		emitProgress: collector.emitProgress,
+		done:         writerDone,
+	}.run()
+
+	backendErr := r.backend().Scan(ctx, roots, func(entry db.Entry) error {
+		return collector.emitEntry(ctx, entriesCh, entry)
+	}, collector.progressState())
+	close(entriesCh)
+	<-writerDone
+	if backendErr != nil {
+		return scanRunResult{}, backendErr
+	}
+	select {
+	case err := <-errCh:
+		return scanRunResult{}, err
+	default:
+	}
+	if err := ctx.Err(); err != nil {
+		return scanRunResult{}, err
+	}
+	return scanRunResult{
+		metrics:        collector.metrics(),
+		sizes:          collector.sizes.snapshot(),
+		protectedPaths: collector.protectedPaths(),
+		emitProgress:   collector.emitProgress,
+	}, nil
+}
+
+type scanWriter struct {
+	ctx          context.Context
+	store        *db.Store
+	sessionID    int64
+	batchSize    int
+	entries      <-chan db.Entry
+	errors       chan<- error
+	indexed      *int64
+	emitProgress func()
+	done         chan<- struct{}
+}
+
+func (w scanWriter) run() {
+	defer close(w.done)
+	batch := make([]db.Entry, 0, w.batchSize)
+	for {
+		select {
+		case <-w.ctx.Done():
+			return
+		case entry, ok := <-w.entries:
+			if !ok {
+				if _, err := w.flush(batch); err != nil {
+					sendErr(w.errors, err)
+				}
+				return
+			}
+			batch = append(batch, entry)
+			if len(batch) >= w.batchSize {
+				var err error
+				batch, err = w.flush(batch)
+				if err != nil {
+					sendErr(w.errors, err)
+					return
+				}
+			}
+		}
+	}
+}
+
+func (w scanWriter) flush(batch []db.Entry) ([]db.Entry, error) {
+	if len(batch) == 0 {
+		return batch, nil
+	}
+	if err := w.store.UpsertBatch(w.ctx, batch); err != nil {
+		return batch, err
+	}
+	if err := w.store.MarkSeenBatch(w.ctx, w.sessionID, batch); err != nil {
+		return batch, err
+	}
+	atomic.AddInt64(w.indexed, int64(len(batch)))
+	w.emitProgress()
+	return batch[:0], nil
+}
+func (r Runner) finishScan(ctx context.Context, sessionID int64, roots []string, protectedPaths []string) error {
+	for _, path := range protectedPaths {
+		if err := r.Store.MarkUnreadablePrefix(ctx, sessionID, path); err != nil {
+			return err
+		}
+	}
+	return r.Store.FinishScan(ctx, sessionID, roots)
+}
+
+func (r Runner) backend() scanner {
 	backend := strings.ToLower(strings.TrimSpace(r.Backend))
 	if backend == "" {
 		backend = BackendAuto
@@ -355,7 +416,7 @@ func (r Runner) walkBackend() walkBackend {
 	return walkBackend{workers: workers, exclude: r.Exclude}
 }
 
-func sendErr(errCh chan error, err error) {
+func sendErr(errCh chan<- error, err error) {
 	select {
 	case errCh <- err:
 	default:
@@ -384,51 +445,9 @@ func (b walkBackend) Scan(ctx context.Context, roots []string, emit func(db.Entr
 	for _, root := range roots {
 		root := root
 		exclude := newExcludeMatcher(root, b.exclude)
-		err := fastwalk.Walk(&fastwalk.Config{Follow: false, NumWorkers: b.workers}, root, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				progress.CurrentPath.Store(path)
-				atomic.AddInt64(progress.Skipped, 1)
-				progress.Emit()
-				if filepath.Clean(path) == filepath.Clean(root) {
-					return err
-				}
-				if progress.Protect != nil {
-					progress.Protect(path)
-				}
-				return nil
-			}
-
-			if d.IsDir() && mountFilter != nil && mountFilter(root, path) {
-				return fastwalk.SkipDir
-			}
-			if exclude(path, d.IsDir()) {
-				if d.IsDir() {
-					return fastwalk.SkipDir
-				}
-				progress.CurrentPath.Store(path)
-				atomic.AddInt64(progress.Skipped, 1)
-				progress.Emit()
-				return nil
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			default:
-			}
-
-			info, infoErr := d.Info()
-			if infoErr != nil {
-				atomic.AddInt64(progress.Skipped, 1)
-				if progress.Protect != nil {
-					progress.Protect(path)
-				}
-				return nil
-			}
-
-			progress.CurrentPath.Store(path)
-			atomic.AddInt64(progress.Scanned, 1)
-			progress.Emit()
-			return emit(db.NewEntryFromPath(root, path, info.Size(), info.ModTime(), d.IsDir()))
+		handler := walkEntryHandler{ctx: ctx, root: root, mountFilter: mountFilter, exclude: exclude, emit: emit, progress: progress}
+		err := fastwalk.Walk(&fastwalk.Config{Follow: false, NumWorkers: b.workers}, root, func(path string, d fs.DirEntry, walkErr error) error {
+			return handler.handle(path, d, walkErr)
 		})
 		if err != nil && !errors.Is(err, context.Canceled) {
 			return err
@@ -437,16 +456,65 @@ func (b walkBackend) Scan(ctx context.Context, roots []string, emit func(db.Entr
 	return nil
 }
 
-func newExcludeMatcher(root string, patterns []string) func(path string, isDir bool) bool {
-	normalized := make([]string, 0, len(patterns))
-	for _, pattern := range patterns {
-		trimmed := strings.TrimSpace(pattern)
-		if trimmed == "" {
-			continue
-		}
-		normalized = append(normalized, filepath.Clean(trimmed))
-	}
+type walkEntryHandler struct {
+	ctx         context.Context
+	root        string
+	mountFilter func(root, path string) bool
+	exclude     func(string, bool) bool
+	emit        func(db.Entry) error
+	progress    scanProgress
+}
 
+func (h walkEntryHandler) handle(path string, d fs.DirEntry, walkErr error) error {
+	if walkErr != nil {
+		h.progress.CurrentPath.Store(path)
+		atomic.AddInt64(h.progress.Skipped, 1)
+		h.progress.Emit()
+		if filepath.Clean(path) == filepath.Clean(h.root) {
+			return walkErr
+		}
+		if h.progress.Protect != nil {
+			h.progress.Protect(path)
+		}
+		return nil
+	}
+	if d.IsDir() && h.mountFilter != nil && h.mountFilter(h.root, path) {
+		return fastwalk.SkipDir
+	}
+	if h.exclude(path, d.IsDir()) {
+		return skipWalkEntry(path, d.IsDir(), h.progress)
+	}
+	select {
+	case <-h.ctx.Done():
+		return h.ctx.Err()
+	default:
+	}
+	info, infoErr := d.Info()
+	if infoErr != nil {
+		atomic.AddInt64(h.progress.Skipped, 1)
+		if h.progress.Protect != nil {
+			h.progress.Protect(path)
+		}
+		return nil
+	}
+	h.progress.CurrentPath.Store(path)
+	atomic.AddInt64(h.progress.Scanned, 1)
+	h.progress.Emit()
+	return h.emit(db.NewEntryFromPath(h.root, path, info.Size(), info.ModTime(), d.IsDir()))
+}
+
+func skipWalkEntry(path string, isDir bool, progress scanProgress) error {
+	if isDir {
+		return fastwalk.SkipDir
+	}
+	progress.CurrentPath.Store(path)
+	atomic.AddInt64(progress.Skipped, 1)
+	progress.Emit()
+	return nil
+}
+
+func newExcludeMatcher(root string, patterns []string) func(path string, isDir bool) bool {
+	normalized := normalizeExcludePatterns(patterns)
 	root = filepath.Clean(root)
 
 	return func(path string, _ bool) bool {
@@ -458,27 +526,40 @@ func newExcludeMatcher(root string, patterns []string) func(path string, isDir b
 		rel = filepath.Clean(rel)
 
 		for _, pattern := range normalized {
-			if strings.Contains(pattern, string(filepath.Separator)) {
-				if strings.HasSuffix(pattern, string(filepath.Separator)+"*") {
-					prefix := strings.TrimSuffix(pattern, string(filepath.Separator)+"*")
-					if rel == prefix || strings.HasPrefix(rel, prefix+string(filepath.Separator)) {
-						return true
-					}
-				}
-				if ok, _ := filepath.Match(pattern, rel); ok {
-					return true
-				}
-				continue
-			}
-
-			if filepath.Base(path) == pattern {
-				return true
-			}
-			if ok, _ := filepath.Match(pattern, filepath.Base(path)); ok {
+			if excludePatternMatches(path, rel, pattern) {
 				return true
 			}
 		}
 
 		return false
 	}
+}
+
+func normalizeExcludePatterns(patterns []string) []string {
+	normalized := make([]string, 0, len(patterns))
+	for _, pattern := range patterns {
+		if trimmed := strings.TrimSpace(pattern); trimmed != "" {
+			normalized = append(normalized, filepath.Clean(trimmed))
+		}
+	}
+	return normalized
+}
+
+func excludePatternMatches(path, rel, pattern string) bool {
+	if strings.Contains(pattern, string(filepath.Separator)) {
+		if strings.HasSuffix(pattern, string(filepath.Separator)+"*") {
+			prefix := strings.TrimSuffix(pattern, string(filepath.Separator)+"*")
+			if rel == prefix || strings.HasPrefix(rel, prefix+string(filepath.Separator)) {
+				return true
+			}
+		}
+		matched, _ := filepath.Match(pattern, rel)
+		return matched
+	}
+	base := filepath.Base(path)
+	if base == pattern {
+		return true
+	}
+	matched, _ := filepath.Match(pattern, base)
+	return matched
 }

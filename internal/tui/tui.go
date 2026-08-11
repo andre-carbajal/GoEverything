@@ -43,6 +43,21 @@ const (
 	deleteConfirmModal
 )
 
+const (
+	initialScanLabel  = "initial-scan"
+	manualScanLabel   = "manual-scan"
+	unixBinPrefix     = "/usr/bin/"
+	windowsExplorer   = `C:\Windows\System32\explorer.exe`
+	xdgOpenName       = "xdg-open"
+	gioName           = "gio"
+	kdeOpen5Name      = "kde-open5"
+	kdeOpenName       = "kde-open"
+	groovboxAccent    = "#83a598"
+	groovboxSurface   = "#3c3836"
+	catppuccinAccent  = "#89dceb"
+	catppuccinSurface = "#313244"
+)
+
 type searchDoneMsg struct {
 	query   string
 	results []db.Entry
@@ -175,7 +190,7 @@ func (s *scanProgressSource) snapshot(session int) (scanner.Progress, bool) {
 }
 
 type model struct {
-	ctx context.Context
+	commandContext func() context.Context
 
 	cfg        config.Config
 	saveConfig func(config.Config) error
@@ -242,7 +257,7 @@ type model struct {
 
 func Run(ctx context.Context, cfg config.Config) error {
 	m := newModel(ctx, cfg)
-	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseAllMotion())
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseAllMotion(), tea.WithContext(ctx))
 	_, err := p.Run()
 	return err
 }
@@ -265,18 +280,18 @@ func newModel(ctx context.Context, cfg config.Config) model {
 	cfgInput.Width = 60
 
 	m := model{
-		ctx:         ctx,
-		cfg:         cfg,
-		saveConfig:  config.Save,
-		width:       120,
-		height:      36,
-		mode:        viewLocation,
-		modal:       noModal,
-		searchInput: searchInput,
-		cfgInput:    cfgInput,
-		theme:       themeByName(cfg.Theme),
-		themes:      []string{"tokyonight", "catppuccin", "groovbox"},
-		status:      "choose a location to scan",
+		commandContext: func() context.Context { return ctx },
+		cfg:            cfg,
+		saveConfig:     config.Save,
+		width:          120,
+		height:         36,
+		mode:           viewLocation,
+		modal:          noModal,
+		searchInput:    searchInput,
+		cfgInput:       cfgInput,
+		theme:          themeByName(cfg.Theme),
+		themes:         []string{"tokyonight", "catppuccin", "groovbox"},
+		status:         "choose a location to scan",
 
 		scanProgressSource: newScanProgressSource(),
 	}
@@ -287,12 +302,19 @@ func newModel(ctx context.Context, cfg config.Config) model {
 	m.locationInput = locationInput
 	m.searchTable = newSearchTable(m.theme)
 	m = m.resizeComponents()
-	m = m.openLocationPickerView("initial-scan")
+	m = m.openLocationPickerView(initialScanLabel)
 	return m
 }
 
+func (m model) context() context.Context {
+	if m.commandContext == nil {
+		return context.Background()
+	}
+	return m.commandContext()
+}
+
 func (m model) Init() tea.Cmd {
-	return tea.Batch(countCmd(m.ctx, m.cfg.DBPath), textinput.Blink)
+	return tea.Batch(countCmd(m.context(), m.cfg.DBPath), textinput.Blink)
 }
 
 func newSearchTable(th theme) table.Model {
@@ -624,67 +646,85 @@ func (m model) modalInputHitbox() hitbox {
 
 func (m model) resolveMouseTarget(x, y int) mouseTarget {
 	if m.modal != noModal {
-		switch m.modal {
-		case noModal:
-		case themeModal:
-			for i := range m.themes {
-				if m.themeOptionHitbox(i).contains(x, y) {
-					return mouseTarget{kind: mouseTargetThemeOption, index: i}
-				}
-			}
-		case excludeInputModal:
-			if m.modalInputHitbox().contains(x, y) {
-				return mouseTarget{kind: mouseTargetModalInput}
-			}
-		case deleteConfirmModal:
-		}
-		if !m.modalBoxHitbox().contains(x, y) {
-			return mouseTarget{kind: mouseTargetModalOutside}
-		}
-		return mouseTarget{kind: mouseTargetNone}
+		return m.resolveModalMouseTarget(x, y)
 	}
 
 	switch m.mode {
 	case viewLocation:
-		if m.locationInputHitbox().contains(x, y) {
-			return mouseTarget{kind: mouseTargetLocationInput}
-		}
-		if strings.TrimSpace(m.locationInput.Value()) == "" {
-			for i := range m.locationRoots {
-				if m.locationRootHitbox(i).contains(x, y) {
-					return mouseTarget{kind: mouseTargetLocationRoot, index: i}
-				}
-			}
-		} else {
-			for i := range m.locationSuggestions {
-				if m.locationSuggestionHitbox(i).contains(x, y) {
-					return mouseTarget{kind: mouseTargetLocationSuggestion, index: i}
-				}
-			}
-		}
+		return m.resolveLocationMouseTarget(x, y)
 	case viewSearch:
-		if m.settingsButtonHitbox().contains(x, y) {
-			return mouseTarget{kind: mouseTargetSettings}
-		}
-		if m.searchInputHitbox().contains(x, y) {
-			return mouseTarget{kind: mouseTargetSearchInput}
-		}
-		start, end := m.searchVisibleRange()
-		for i := start; i < end; i++ {
-			if m.searchResultHitbox(i).contains(x, y) {
-				return mouseTarget{kind: mouseTargetSearchResult, index: i}
-			}
-		}
+		return m.resolveSearchMouseTarget(x, y)
 	case viewConfig:
-		for i := 0; i < 3; i++ {
-			if m.configRowHitbox(i).contains(x, y) {
-				return mouseTarget{kind: mouseTargetConfigRow, index: i}
+		return m.resolveConfigMouseTarget(x, y)
+	}
+	return mouseTarget{kind: mouseTargetNone}
+}
+
+func (m model) resolveModalMouseTarget(x, y int) mouseTarget {
+	switch m.modal {
+	case themeModal:
+		for i := range m.themes {
+			if m.themeOptionHitbox(i).contains(x, y) {
+				return mouseTarget{kind: mouseTargetThemeOption, index: i}
 			}
 		}
-		for i := range m.cfg.Excludes {
-			if m.configExcludeHitbox(i).contains(x, y) {
-				return mouseTarget{kind: mouseTargetConfigExclude, index: i}
+	case excludeInputModal:
+		if m.modalInputHitbox().contains(x, y) {
+			return mouseTarget{kind: mouseTargetModalInput}
+		}
+	case deleteConfirmModal:
+	}
+	if !m.modalBoxHitbox().contains(x, y) {
+		return mouseTarget{kind: mouseTargetModalOutside}
+	}
+	return mouseTarget{kind: mouseTargetNone}
+}
+
+func (m model) resolveLocationMouseTarget(x, y int) mouseTarget {
+	if m.locationInputHitbox().contains(x, y) {
+		return mouseTarget{kind: mouseTargetLocationInput}
+	}
+	if strings.TrimSpace(m.locationInput.Value()) == "" {
+		for i := range m.locationRoots {
+			if m.locationRootHitbox(i).contains(x, y) {
+				return mouseTarget{kind: mouseTargetLocationRoot, index: i}
 			}
+		}
+		return mouseTarget{kind: mouseTargetNone}
+	}
+	for i := range m.locationSuggestions {
+		if m.locationSuggestionHitbox(i).contains(x, y) {
+			return mouseTarget{kind: mouseTargetLocationSuggestion, index: i}
+		}
+	}
+	return mouseTarget{kind: mouseTargetNone}
+}
+
+func (m model) resolveSearchMouseTarget(x, y int) mouseTarget {
+	if m.settingsButtonHitbox().contains(x, y) {
+		return mouseTarget{kind: mouseTargetSettings}
+	}
+	if m.searchInputHitbox().contains(x, y) {
+		return mouseTarget{kind: mouseTargetSearchInput}
+	}
+	start, end := m.searchVisibleRange()
+	for i := start; i < end; i++ {
+		if m.searchResultHitbox(i).contains(x, y) {
+			return mouseTarget{kind: mouseTargetSearchResult, index: i}
+		}
+	}
+	return mouseTarget{kind: mouseTargetNone}
+}
+
+func (m model) resolveConfigMouseTarget(x, y int) mouseTarget {
+	for i := 0; i < 3; i++ {
+		if m.configRowHitbox(i).contains(x, y) {
+			return mouseTarget{kind: mouseTargetConfigRow, index: i}
+		}
+	}
+	for i := range m.cfg.Excludes {
+		if m.configExcludeHitbox(i).contains(x, y) {
+			return mouseTarget{kind: mouseTargetConfigExclude, index: i}
 		}
 	}
 	return mouseTarget{kind: mouseTargetNone}
@@ -823,42 +863,11 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	target := m.resolveMouseTarget(ev.X, ev.Y)
 
 	if ev.Action == tea.MouseActionMotion {
-		m.hoveredMouse = target
-		if ev.Button == tea.MouseButtonLeft && target.kind == mouseTargetSearchResult {
-			m = m.selectSearchResult(target.index)
-		}
-		return m, nil
+		return m.handleMouseMotion(ev, target)
 	}
 
 	if ev.IsWheel() {
-		delta := 0
-		switch ev.Button {
-		case tea.MouseButtonWheelUp:
-			delta = -1
-		case tea.MouseButtonWheelDown:
-			delta = 1
-		case tea.MouseButtonNone, tea.MouseButtonLeft, tea.MouseButtonMiddle, tea.MouseButtonRight,
-			tea.MouseButtonWheelLeft, tea.MouseButtonWheelRight, tea.MouseButtonBackward,
-			tea.MouseButtonForward, tea.MouseButton10, tea.MouseButton11:
-		}
-		if delta == 0 {
-			return m, nil
-		}
-		if m.modal != noModal {
-			return m.scrollModal(delta), nil
-		}
-		switch m.mode {
-		case viewLocation:
-			m = m.scrollLocation(delta)
-		case viewStartup:
-		case viewSearch:
-			m = m.scrollSearchResults(delta)
-		case viewUsage:
-			m.usageCur = min(max(0, m.usageCur+delta), max(0, m.usageRowCount()-1))
-		case viewConfig:
-			m = m.scrollConfig(delta)
-		}
-		return m, nil
+		return m.handleMouseWheel(ev)
 	}
 
 	rightClick := ev.Button == tea.MouseButtonRight && (ev.Action == tea.MouseActionPress || ev.Action == tea.MouseActionRelease)
@@ -881,6 +890,49 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 
+	return m.handleMousePress(ev, target)
+}
+
+func (m model) handleMouseMotion(ev tea.MouseEvent, target mouseTarget) (model, tea.Cmd) {
+	m.hoveredMouse = target
+	if ev.Button == tea.MouseButtonLeft && target.kind == mouseTargetSearchResult {
+		m = m.selectSearchResult(target.index)
+	}
+	return m, nil
+}
+
+func (m model) handleMouseWheel(ev tea.MouseEvent) (model, tea.Cmd) {
+	delta := 0
+	switch ev.Button {
+	case tea.MouseButtonWheelUp:
+		delta = -1
+	case tea.MouseButtonWheelDown:
+		delta = 1
+	case tea.MouseButtonNone, tea.MouseButtonLeft, tea.MouseButtonMiddle, tea.MouseButtonRight,
+		tea.MouseButtonWheelLeft, tea.MouseButtonWheelRight, tea.MouseButtonBackward,
+		tea.MouseButtonForward, tea.MouseButton10, tea.MouseButton11:
+	}
+	if delta == 0 {
+		return m, nil
+	}
+	if m.modal != noModal {
+		return m.scrollModal(delta), nil
+	}
+	switch m.mode {
+	case viewLocation:
+		m = m.scrollLocation(delta)
+	case viewSearch:
+		m = m.scrollSearchResults(delta)
+	case viewUsage:
+		m.usageCur = min(max(0, m.usageCur+delta), max(0, m.usageRowCount()-1))
+	case viewConfig:
+		m = m.scrollConfig(delta)
+	case viewStartup:
+	}
+	return m, nil
+}
+
+func (m model) handleMousePress(ev tea.MouseEvent, target mouseTarget) (model, tea.Cmd) {
 	m.pressedMouse = target
 	m.dragOrigin = target
 	m.hoveredMouse = target
@@ -931,200 +983,240 @@ func (m model) handleMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
-		m.width = msg.Width
-		m.height = msg.Height
-		m = m.resizeComponents()
-		return m, nil
-
-	case countDoneMsg:
-		if msg.err == nil {
-			m.totalIndexed = msg.total
-		} else {
-			m.err = msg.err
-		}
-		return m, nil
-
-	case usageDoneMsg:
-		if msg.seq != m.usageSeq || msg.root != m.usageRoot {
-			return m, nil
-		}
-		m.usageBusy = false
-		m.usageTotal = msg.total
-		m.usageItems = msg.items
-		m.usageCur = min(m.usageCur, max(0, len(m.usageItems)-1))
-		m.err = msg.err
-		return m, nil
-
-	case openDoneMsg:
-		if msg.err != nil {
-			m.err = msg.err
-			m.status = "open failed"
-		}
-		return m, nil
-
-	case locationSuggestionsMsg:
-		if msg.seq != m.locationInputSeq || msg.input != m.locationInput.Value() {
-			return m, nil
-		}
-		m.locationSuggestions = msg.suggestions
-		m.locationSuggestionCursor = -1
-		m.locationSuggestionActive = false
-		if msg.err != nil && strings.TrimSpace(msg.input) != "" {
-			m.err = msg.err
-		} else if msg.err == nil {
-			m.err = nil
-		}
-		return m, nil
-
-	case searchDoneMsg:
-		if msg.query == m.searchInput.Value() {
-			m.searchRes = msg.results
-			if m.searchCur >= len(m.searchRes) {
-				m.searchCur = max(0, len(m.searchRes)-1)
-			}
-			m = m.syncSearchTableRows()
-			m.err = msg.err
-		}
-		return m, nil
-
-	case reindexDoneMsg:
-		m.scanCancel = nil
-		m.busy = false
-		m.lastMetrics = msg.metrics
-		if errors.Is(msg.err, context.Canceled) {
-			m.err = nil
-			m.status = "scan canceled"
-			m = m.openLocationPickerView("manual-scan")
-			return m, countCmd(m.ctx, m.cfg.DBPath)
-		}
-		m.err = msg.err
-		if msg.err == nil {
-			m.status = fmt.Sprintf("re-index done: scanned=%d indexed=%d", msg.metrics.Scanned, msg.metrics.Indexed)
-			m = m.focusSearchView()
-		} else {
-			m.status = "re-index failed"
-			m = m.openLocationPickerView("manual-scan")
-		}
-		return m, countCmd(m.ctx, m.cfg.DBPath)
-
-	case scanDoneMsg:
-		m.scanCancel = nil
-		m.busy = false
-		m.lastMetrics = msg.metrics
-		startup := msg.label == "initial-scan"
-		manual := msg.label == "manual-scan"
-		if errors.Is(msg.err, context.Canceled) {
-			m.err = nil
-			m.status = "scan canceled"
-			if startup || manual {
-				m = m.openLocationPickerView(msg.label)
-			}
-			return m, countCmd(m.ctx, m.cfg.DBPath)
-		}
-		m.err = msg.err
-		if msg.err == nil {
-			m.status = fmt.Sprintf("%s done: scanned=%d indexed=%d", msg.label, msg.metrics.Scanned, msg.metrics.Indexed)
-			if startup || manual {
-				m = m.focusSearchView()
-			}
-		} else {
-			m.status = msg.label + " failed"
-			if startup || manual {
-				m = m.openLocationPickerView(msg.label)
-			}
-		}
-		return m, countCmd(m.ctx, m.cfg.DBPath)
-
-	case debounceSearchMsg:
-		if msg.seq != m.searchSeq {
-			return m, nil
-		}
-		if strings.TrimSpace(msg.query) == "" {
-			m.searchRes = nil
-			return m, nil
-		}
-		if m.cfg.LastSearch != msg.query {
-			m.cfg.LastSearch = msg.query
-			if err := m.saveConfig(m.cfg); err != nil {
-				m.err = err
-			}
-		}
-		return m, searchCmd(m.ctx, m.cfg.DBPath, msg.query, m.activeScanRoot)
-
-	case scanProgressTickMsg:
-		if msg.session != m.scanSession || !m.busy || m.scanProgressSource == nil {
-			return m, nil
-		}
-		if progress, ok := m.scanProgressSource.snapshot(msg.session); ok {
-			m.scanProgress = progress
-		}
-		return m, scanProgressTickCmd(msg.session)
-
-	case deleteResultDoneMsg:
-		m.err = msg.err
-		if msg.err != nil {
-			m.status = "delete failed"
-			return m, nil
-		}
-		m = m.removeDeletedResult(msg.entry)
-		m.totalIndexed = msg.total
-		m.status = "result deleted"
-		return m, nil
-
+		m.width, m.height = msg.Width, msg.Height
+		return m.resizeComponents(), nil
 	case tea.MouseMsg:
 		return m.handleMouse(msg)
-
 	case tea.KeyMsg:
-		switch msg.String() {
-		case "ctrl+q":
-			return m, tea.Quit
-		}
-		if m.modal != noModal {
-			return m.handleModalKey(msg)
-		}
-		switch msg.String() {
-		case "ctrl+x":
-			if m.busy && m.scanCancel != nil {
-				m.status = "stopping scan..."
-				m.scanCancel()
-				return m, nil
-			}
-		case "ctrl+g":
-			if !m.busy {
-				m = m.openLocationPickerView("manual-scan")
-				return m, nil
-			}
-		case "ctrl+s":
-			if m.mode == viewSearch {
-				m = m.openSettingsView()
-				return m, nil
-			}
-		case "ctrl+u":
-			if m.mode == viewSearch && !m.busy {
-				return m.openUsageView()
-			}
-		case "esc":
-			if m.mode == viewConfig {
-				m = m.focusSearchView()
-				return m, nil
-			}
-		}
+		return m.handleKey(msg)
+	default:
+		return m.handleAsync(msg)
+	}
+}
 
-		switch m.mode {
-		case viewLocation:
-			return m.updateLocation(msg)
-		case viewSearch:
-			return m.updateSearch(msg)
-		case viewUsage:
-			return m.updateUsage(msg)
-		case viewConfig:
-			return m.updateConfig(msg)
-		case viewStartup:
-			return m, nil
+func (m model) handleAsync(msg tea.Msg) (tea.Model, tea.Cmd) {
+	switch msg := msg.(type) {
+	case countDoneMsg:
+		return m.handleCountDone(msg)
+	case usageDoneMsg:
+		return m.handleUsageDone(msg)
+	case openDoneMsg:
+		return m.handleOpenDone(msg)
+	case locationSuggestionsMsg:
+		return m.handleLocationSuggestions(msg)
+	case searchDoneMsg:
+		return m.handleSearchDone(msg)
+	case reindexDoneMsg:
+		return m.handleReindexDone(msg)
+	case scanDoneMsg:
+		return m.handleScanDone(msg)
+	case debounceSearchMsg:
+		return m.handleDebounceSearch(msg)
+	case scanProgressTickMsg:
+		return m.handleScanProgress(msg)
+	case deleteResultDoneMsg:
+		return m.handleDeleteResultDone(msg)
+	}
+	return m, nil
+}
+
+func (m model) handleCountDone(msg countDoneMsg) (model, tea.Cmd) {
+	if msg.err == nil {
+		m.totalIndexed = msg.total
+	} else {
+		m.err = msg.err
+	}
+	return m, nil
+}
+
+func (m model) handleUsageDone(msg usageDoneMsg) (model, tea.Cmd) {
+	if msg.seq != m.usageSeq || msg.root != m.usageRoot {
+		return m, nil
+	}
+	m.usageBusy = false
+	m.usageTotal = msg.total
+	m.usageItems = msg.items
+	m.usageCur = min(m.usageCur, max(0, len(m.usageItems)-1))
+	m.err = msg.err
+	return m, nil
+}
+
+func (m model) handleOpenDone(msg openDoneMsg) (model, tea.Cmd) {
+	if msg.err != nil {
+		m.err = msg.err
+		m.status = "open failed"
+	}
+	return m, nil
+}
+
+func (m model) handleLocationSuggestions(msg locationSuggestionsMsg) (model, tea.Cmd) {
+	if msg.seq != m.locationInputSeq || msg.input != m.locationInput.Value() {
+		return m, nil
+	}
+	m.locationSuggestions = msg.suggestions
+	m.locationSuggestionCursor = -1
+	m.locationSuggestionActive = false
+	if msg.err != nil && strings.TrimSpace(msg.input) != "" {
+		m.err = msg.err
+	} else if msg.err == nil {
+		m.err = nil
+	}
+	return m, nil
+}
+
+func (m model) handleSearchDone(msg searchDoneMsg) (model, tea.Cmd) {
+	if msg.query != m.searchInput.Value() {
+		return m, nil
+	}
+	m.searchRes = msg.results
+	if m.searchCur >= len(m.searchRes) {
+		m.searchCur = max(0, len(m.searchRes)-1)
+	}
+	m = m.syncSearchTableRows()
+	m.err = msg.err
+	return m, nil
+}
+
+func (m model) handleReindexDone(msg reindexDoneMsg) (tea.Model, tea.Cmd) {
+	m.scanCancel = nil
+	m.busy = false
+	m.lastMetrics = msg.metrics
+	if errors.Is(msg.err, context.Canceled) {
+		m.err = nil
+		m.status = "scan canceled"
+		m = m.openLocationPickerView(manualScanLabel)
+		return m, countCmd(m.context(), m.cfg.DBPath)
+	}
+	m.err = msg.err
+	if msg.err == nil {
+		m.status = fmt.Sprintf("re-index done: scanned=%d indexed=%d", msg.metrics.Scanned, msg.metrics.Indexed)
+		m = m.focusSearchView()
+	} else {
+		m.status = "re-index failed"
+		m = m.openLocationPickerView(manualScanLabel)
+	}
+	return m, countCmd(m.context(), m.cfg.DBPath)
+}
+
+func (m model) handleScanDone(msg scanDoneMsg) (tea.Model, tea.Cmd) {
+	m.scanCancel = nil
+	m.busy = false
+	m.lastMetrics = msg.metrics
+	startup := msg.label == initialScanLabel
+	manual := msg.label == manualScanLabel
+	if errors.Is(msg.err, context.Canceled) {
+		m.err = nil
+		m.status = "scan canceled"
+		if startup || manual {
+			m = m.openLocationPickerView(msg.label)
+		}
+		return m, countCmd(m.context(), m.cfg.DBPath)
+	}
+	m.err = msg.err
+	if msg.err == nil {
+		m.status = fmt.Sprintf("%s done: scanned=%d indexed=%d", msg.label, msg.metrics.Scanned, msg.metrics.Indexed)
+		if startup || manual {
+			m = m.focusSearchView()
+		}
+	} else {
+		m.status = msg.label + " failed"
+		if startup || manual {
+			m = m.openLocationPickerView(msg.label)
 		}
 	}
+	return m, countCmd(m.context(), m.cfg.DBPath)
+}
 
+func (m model) handleDebounceSearch(msg debounceSearchMsg) (tea.Model, tea.Cmd) {
+	if msg.seq != m.searchSeq {
+		return m, nil
+	}
+	if strings.TrimSpace(msg.query) == "" {
+		m.searchRes = nil
+		return m, nil
+	}
+	if m.cfg.LastSearch != msg.query {
+		m.cfg.LastSearch = msg.query
+		if err := m.saveConfig(m.cfg); err != nil {
+			m.err = err
+		}
+	}
+	return m, searchCmd(m.context(), m.cfg.DBPath, msg.query, m.activeScanRoot)
+}
+
+func (m model) handleScanProgress(msg scanProgressTickMsg) (tea.Model, tea.Cmd) {
+	if msg.session != m.scanSession || !m.busy || m.scanProgressSource == nil {
+		return m, nil
+	}
+	if progress, ok := m.scanProgressSource.snapshot(msg.session); ok {
+		m.scanProgress = progress
+	}
+	return m, scanProgressTickCmd(msg.session)
+}
+
+func (m model) handleDeleteResultDone(msg deleteResultDoneMsg) (tea.Model, tea.Cmd) {
+	m.err = msg.err
+	if msg.err != nil {
+		m.status = "delete failed"
+		return m, nil
+	}
+	m = m.removeDeletedResult(msg.entry)
+	m.totalIndexed = msg.total
+	m.status = "result deleted"
 	return m, nil
+}
+
+func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if msg.String() == "ctrl+q" {
+		return m, tea.Quit
+	}
+	if m.modal != noModal {
+		return m.handleModalKey(msg)
+	}
+	if updated, cmd, handled := m.handleGlobalKey(msg); handled {
+		return updated, cmd
+	}
+	switch m.mode {
+	case viewLocation:
+		return m.updateLocation(msg)
+	case viewSearch:
+		return m.updateSearch(msg)
+	case viewUsage:
+		return m.updateUsage(msg)
+	case viewConfig:
+		return m.updateConfig(msg)
+	default:
+		return m, nil
+	}
+}
+
+func (m model) handleGlobalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
+	switch msg.String() {
+	case "ctrl+x":
+		if m.busy && m.scanCancel != nil {
+			m.status = "stopping scan..."
+			m.scanCancel()
+			return m, nil, true
+		}
+	case "ctrl+g":
+		if !m.busy {
+			return m.openLocationPickerView(manualScanLabel), nil, true
+		}
+	case "ctrl+s":
+		if m.mode == viewSearch {
+			return m.openSettingsView(), nil, true
+		}
+	case "ctrl+u":
+		if m.mode == viewSearch && !m.busy {
+			updated, cmd := m.openUsageView()
+			return updated, cmd, true
+		}
+	case "esc":
+		if m.mode == viewConfig {
+			return m.focusSearchView(), nil, true
+		}
+	}
+	return m, nil, false
 }
 
 func (m model) openUsageView() (model, tea.Cmd) {
@@ -1145,7 +1237,7 @@ func (m model) openUsageView() (model, tea.Cmd) {
 	m.usageBusy = true
 	m.err = nil
 	m.status = "loading disk usage…"
-	return m, usageCmd(m.ctx, m.cfg.DBPath, root, m.usageSeq)
+	return m, usageCmd(m.context(), m.cfg.DBPath, root, m.usageSeq)
 }
 
 func (m model) loadUsage(root string) (model, tea.Cmd) {
@@ -1161,7 +1253,7 @@ func (m model) loadUsage(root string) (model, tea.Cmd) {
 	m.usageBusy = true
 	m.err = nil
 	m.status = "loading disk usage…"
-	return m, usageCmd(m.ctx, m.cfg.DBPath, root, m.usageSeq)
+	return m, usageCmd(m.context(), m.cfg.DBPath, root, m.usageSeq)
 }
 
 func (m model) updateUsage(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -1375,7 +1467,7 @@ func (m model) handleDeleteConfirmModalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) 
 		index := m.deleteIndex
 		m = m.closeModal()
 		m.status = "deleting result..."
-		return m, deleteResultCmd(m.ctx, m.cfg, entry, index)
+		return m, deleteResultCmd(m.context(), m.cfg, entry, index)
 	case "esc", "n":
 		m.status = "delete canceled"
 		return m.closeModal(), nil
@@ -1592,7 +1684,7 @@ func (m model) panelStyle() lipgloss.Style {
 		Padding(0, 1)
 }
 
-func (m model) itemStyleState(active bool, hovered bool) lipgloss.Style {
+func (m model) itemStyleState(active, hovered bool) lipgloss.Style {
 	st := m.panelStyle()
 	if active {
 		st = st.BorderForeground(m.theme.BorderHi).Background(m.theme.SurfaceBG)
@@ -1616,7 +1708,7 @@ func (m model) inputFocusStyle() lipgloss.Style {
 func (m model) viewStartup(width, height int) string {
 	message := "Scanning index…"
 	switch m.activeScanLabel {
-	case "initial-scan":
+	case initialScanLabel:
 		message = "Scanning before search opens…"
 	case "reindex":
 		message = "Re-indexing…"
@@ -1682,73 +1774,91 @@ func (m model) viewUsage(width, height int) string {
 	panel := m.panelStyle()
 	innerWidth := max(1, width-panel.GetHorizontalFrameSize())
 	innerHeight := max(1, height-panel.GetVerticalFrameSize())
-	root := trimMiddle(m.usageRoot, max(1, innerWidth-len("scope: ")))
-	lines := []string{
-		m.theme.Title.Render("DISK USAGE"),
-		m.theme.Muted.Render("scope: " + root),
-		m.theme.Highlight.Render("total: " + formatBytes(m.usageTotal)),
-		m.theme.Muted.Render(fmt.Sprintf("items: %d", len(m.usageItems))),
-		"",
-	}
+	lines := m.usageHeader(innerWidth)
 	if m.usageBusy {
 		lines = append(lines, m.theme.Muted.Render("Calculating directory sizes…"))
 	} else if len(m.usageItems) == 0 && !m.usageHasParent() {
 		lines = append(lines, m.theme.Muted.Render("No files or subdirectories found in this indexed location."))
 	} else {
 		lines = append(lines, m.theme.Title.Render("LARGEST ITEMS"))
-		visibleRows := max(0, innerHeight-len(lines))
-		start := 0
-		if visibleRows > 0 && m.usageCur >= visibleRows {
-			start = m.usageCur - visibleRows + 1
-		}
-		end := min(m.usageRowCount(), start+visibleRows)
-		for row := start; row < end; row++ {
-			if m.usageHasParent() && row == 0 {
-				marker := "  "
-				style := m.theme.Text
-				if m.usageCur == 0 {
-					marker = "› "
-					style = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Bold(true)
-				}
-				lines = append(lines, style.Render(marker+".. Volver"))
-				continue
-			}
-			itemIndex := row
-			if m.usageHasParent() {
-				itemIndex--
-			}
-			entry := m.usageItems[itemIndex]
-			kind := "F"
-			if entry.IsDir {
-				kind = "D"
-			}
-			percent := 0.0
-			if m.usageTotal > 0 {
-				percent = float64(entry.Size) / float64(m.usageTotal) * 100
-			}
-			marker := "  "
-			if row == m.usageCur {
-				marker = "› "
-			}
-			fixedWidth := lipgloss.Width(fmt.Sprintf("%s%2d [%s]  %10s %6.1f%% ", marker, itemIndex+1, kind, formatBytes(entry.Size), percent))
-			nameWidth := max(1, min(30, innerWidth-fixedWidth))
-			prefix := fmt.Sprintf("%s%2d [%s] %-*s %10s %6.1f%% ", marker, itemIndex+1, kind, nameWidth, trimMiddle(entry.Name, nameWidth), formatBytes(entry.Size), percent)
-			barWidth := max(0, innerWidth-lipgloss.Width(prefix))
-			filled := 0
-			if m.usageItems[0].Size > 0 {
-				filled = int(float64(barWidth) * float64(entry.Size) / float64(m.usageItems[0].Size))
-			}
-			filled = min(barWidth, max(0, filled))
-			bar := m.theme.Highlight.Render(strings.Repeat("█", filled)) + m.theme.Muted.Render(strings.Repeat("░", barWidth-filled))
-			line := m.theme.Text.Render(prefix) + bar
-			if row == m.usageCur {
-				line = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Bold(true).Render(prefix) + bar
-			}
-			lines = append(lines, line)
-		}
+		lines = append(lines, m.usageRows(innerWidth, innerHeight-len(lines))...)
 	}
 	content := lipgloss.Place(innerWidth, innerHeight, lipgloss.Left, lipgloss.Top, strings.Join(lines, "\n"))
 	return panel.Render(content)
+}
+
+func (m model) usageHeader(innerWidth int) []string {
+	root := trimMiddle(m.usageRoot, max(1, innerWidth-len("scope: ")))
+	return []string{
+		m.theme.Title.Render("DISK USAGE"),
+		m.theme.Muted.Render("scope: " + root),
+		m.theme.Highlight.Render("total: " + formatBytes(m.usageTotal)),
+		m.theme.Muted.Render(fmt.Sprintf("items: %d", len(m.usageItems))),
+		"",
+	}
+}
+
+func (m model) usageRows(innerWidth, availableHeight int) []string {
+	visibleRows := max(0, availableHeight)
+	start := 0
+	if visibleRows > 0 && m.usageCur >= visibleRows {
+		start = m.usageCur - visibleRows + 1
+	}
+	end := min(m.usageRowCount(), start+visibleRows)
+	lines := make([]string, 0, max(0, end-start))
+	for row := start; row < end; row++ {
+		if m.usageHasParent() && row == 0 {
+			lines = append(lines, m.usageParentRow())
+			continue
+		}
+		lines = append(lines, m.usageItemRow(row, innerWidth))
+	}
+	return lines
+}
+
+func (m model) usageParentRow() string {
+	marker := "  "
+	style := m.theme.Text
+	if m.usageCur == 0 {
+		marker = "› "
+		style = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Bold(true)
+	}
+	return style.Render(marker + ".. Volver")
+}
+
+func (m model) usageItemRow(row, innerWidth int) string {
+	itemIndex := row
+	if m.usageHasParent() {
+		itemIndex--
+	}
+	entry := m.usageItems[itemIndex]
+	kind := "F"
+	if entry.IsDir {
+		kind = "D"
+	}
+	percent := 0.0
+	if m.usageTotal > 0 {
+		percent = float64(entry.Size) / float64(m.usageTotal) * 100
+	}
+	marker := "  "
+	if row == m.usageCur {
+		marker = "› "
+	}
+	fixedWidth := lipgloss.Width(fmt.Sprintf("%s%2d [%s]  %10s %6.1f%% ", marker, itemIndex+1, kind, formatBytes(entry.Size), percent))
+	nameWidth := max(1, min(30, innerWidth-fixedWidth))
+	prefix := fmt.Sprintf("%s%2d [%s] %-*s %10s %6.1f%% ", marker, itemIndex+1, kind, nameWidth, trimMiddle(entry.Name, nameWidth), formatBytes(entry.Size), percent)
+	barWidth := max(0, innerWidth-lipgloss.Width(prefix))
+	filled := 0
+	if m.usageItems[0].Size > 0 {
+		filled = int(float64(barWidth) * float64(entry.Size) / float64(m.usageItems[0].Size))
+	}
+	filled = min(barWidth, max(0, filled))
+	bar := m.theme.Highlight.Render(strings.Repeat("█", filled)) + m.theme.Muted.Render(strings.Repeat("░", barWidth-filled))
+	line := m.theme.Text.Render(prefix) + bar
+	if row == m.usageCur {
+		line = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Bold(true).Render(prefix) + bar
+	}
+	return line
 }
 
 func (m model) renderEmptySearchResults() string {
@@ -2136,41 +2246,53 @@ func deleteResultCmd(ctx context.Context, cfg config.Config, entry db.Entry, ind
 		if strings.TrimSpace(entry.Path) == "" {
 			return deleteResultDoneMsg{index: index, entry: entry, err: errors.New("path is required")}
 		}
-		isDir := entry.IsDir
-		info, statErr := os.Stat(entry.Path)
-		switch {
-		case statErr == nil:
-			isDir = info.IsDir()
-			if strings.EqualFold(cfg.DeleteMode, config.DeleteModePermanent) {
-				if err := os.RemoveAll(entry.Path); err != nil {
-					return deleteResultDoneMsg{index: index, entry: entry, err: err}
-				}
-			} else if err := moveToTrash(entry.Path); err != nil {
-				return deleteResultDoneMsg{index: index, entry: entry, err: err}
-			}
-		case errors.Is(statErr, os.ErrNotExist):
-		default:
-			return deleteResultDoneMsg{index: index, entry: entry, err: statErr}
+		isDir, err := removeResultPath(cfg, entry)
+		if err != nil {
+			return deleteResultDoneMsg{index: index, entry: entry, err: err}
 		}
 		entry.IsDir = isDir
-
-		store, err := db.Open(ctx, cfg.DBPath)
+		total, err := removeResultFromIndex(ctx, cfg, entry)
 		if err != nil {
 			return deleteResultDoneMsg{index: index, entry: entry, err: err}
 		}
-		defer func() { _ = store.Close() }()
-
-		if isDir {
-			err = store.DeleteByPrefixWithDirectorySize(ctx, entry.Path)
-		} else {
-			err = store.DeleteByPathWithDirectorySize(ctx, entry.Path)
-		}
-		if err != nil {
-			return deleteResultDoneMsg{index: index, entry: entry, err: err}
-		}
-		total, err := store.Count(ctx)
-		return deleteResultDoneMsg{index: index, entry: entry, total: total, err: err}
+		return deleteResultDoneMsg{index: index, entry: entry, total: total}
 	}
+}
+
+func removeResultPath(cfg config.Config, entry db.Entry) (bool, error) {
+	isDir := entry.IsDir
+	info, err := os.Stat(entry.Path)
+	switch {
+	case err == nil:
+		isDir = info.IsDir()
+		if strings.EqualFold(cfg.DeleteMode, config.DeleteModePermanent) {
+			err = os.RemoveAll(entry.Path)
+		} else {
+			err = moveToTrash(entry.Path)
+		}
+	case errors.Is(err, os.ErrNotExist):
+		return isDir, nil
+	default:
+		return isDir, err
+	}
+	return isDir, err
+}
+
+func removeResultFromIndex(ctx context.Context, cfg config.Config, entry db.Entry) (int64, error) {
+	store, err := db.Open(ctx, cfg.DBPath)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = store.Close() }()
+	if entry.IsDir {
+		err = store.DeleteByPrefixWithDirectorySize(ctx, entry.Path)
+	} else {
+		err = store.DeleteByPathWithDirectorySize(ctx, entry.Path)
+	}
+	if err != nil {
+		return 0, err
+	}
+	return store.Count(ctx)
 }
 
 func debounceCmd(seq int, query string) tea.Cmd {
@@ -2241,7 +2363,7 @@ func scanRootsCmd(ctx context.Context, cfg config.Config, roots []string, label 
 }
 
 func (m model) startScanCmd(roots []string, label string, reindex bool) (model, tea.Cmd) {
-	ctx, cancel := context.WithCancel(m.ctx)
+	ctx, cancel := context.WithCancel(m.context())
 	m.scanCancel = cancel
 	m.busy = true
 	m.activeScanLabel = label
@@ -2280,17 +2402,22 @@ func startOpenCommand(path string, reveal bool) error {
 	if reveal {
 		openPath = filepath.Dir(path)
 	}
-	commands := [][]string{
-		{"xdg-open", openPath},
-		{"gio", "open", openPath},
-		{"kde-open5", openPath},
-		{"kde-open", openPath},
+	commands := []struct {
+		name string
+		args []string
+	}{
+		{name: xdgOpenName},
+		{name: gioName, args: []string{"open"}},
+		{name: kdeOpen5Name},
+		{name: kdeOpenName},
 	}
-	for _, args := range commands {
-		if _, err := exec.LookPath(args[0]); err != nil {
+	for _, command := range commands {
+		binary := fixedCommandPath(command.name)
+		if binary == "" {
 			continue
 		}
-		if err := exec.Command(args[0], args[1:]...).Start(); err == nil {
+		args := append(command.args, openPath)
+		if err := exec.Command(binary, args...).Start(); err == nil {
 			return nil
 		}
 	}
@@ -2301,20 +2428,37 @@ func openCommand(path string, reveal bool) *exec.Cmd {
 	switch runtime.GOOS {
 	case "windows":
 		if reveal {
-			return exec.Command("explorer.exe", "/select,"+path)
+			return exec.Command(windowsExplorer, "/select,"+path)
 		}
-		return exec.Command("explorer.exe", path)
+		return exec.Command(windowsExplorer, path)
 	case "darwin":
 		if reveal {
-			return exec.Command("open", "-R", path)
+			return exec.Command("/usr/bin/open", "-R", path)
 		}
-		return exec.Command("open", path)
+		return exec.Command("/usr/bin/open", path)
 	default:
 		if reveal {
-			return exec.Command("xdg-open", filepath.Dir(path))
+			return exec.Command(unixBinPrefix+xdgOpenName, filepath.Dir(path))
 		}
-		return exec.Command("xdg-open", path)
+		return exec.Command(unixBinPrefix+xdgOpenName, path)
 	}
+}
+
+func fixedCommandPath(name string) string {
+	return fixedExecutable(unixBinPrefix+name, "/bin/"+name, "/usr/local/bin/"+name)
+}
+
+func fixedExecutable(candidates ...string) string {
+	for _, candidate := range candidates {
+		if !filepath.IsAbs(candidate) {
+			continue
+		}
+		info, err := os.Stat(candidate)
+		if err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return candidate
+		}
+	}
+	return ""
 }
 
 type theme struct {
@@ -2348,42 +2492,42 @@ func themeByName(name string) theme {
 			Title:     lipgloss.NewStyle().Foreground(lipgloss.Color("#b8bb26")).Bold(true),
 			Text:      lipgloss.NewStyle().Foreground(lipgloss.Color("#ebdbb2")),
 			Muted:     lipgloss.NewStyle().Foreground(lipgloss.Color("#a89984")),
-			Highlight: lipgloss.NewStyle().Foreground(lipgloss.Color("#83a598")).Bold(true),
+			Highlight: lipgloss.NewStyle().Foreground(lipgloss.Color(groovboxAccent)).Bold(true),
 			Err:       lipgloss.NewStyle().Foreground(lipgloss.Color("#fb4934")).Bold(true),
 			Warn:      lipgloss.NewStyle().Foreground(lipgloss.Color("#fe8019")).Bold(true),
 			Border:    "#504945",
-			BorderHi:  "#83a598",
+			BorderHi:  groovboxAccent,
 			SurfaceBG: "#282828",
 			Badge:     "#665c54",
-			Input:     "#83a598",
-			InputBG:   "#3c3836",
+			Input:     groovboxAccent,
+			InputBG:   groovboxSurface,
 			InputFG:   "#ebdbb2",
-			SelectBG:  "#3c3836",
+			SelectBG:  groovboxSurface,
 			SelectFG:  "#fbf1c7",
 			BusyFG:    "#b8bb26",
-			BusyBG:    "#3c3836",
+			BusyBG:    groovboxSurface,
 		}
 	case "catppuccin":
 		return theme{
 			Container: lipgloss.NewStyle().Padding(1, 2),
 			Header:    lipgloss.NewStyle().Foreground(lipgloss.Color("#f5c2e7")),
-			Title:     lipgloss.NewStyle().Foreground(lipgloss.Color("#89dceb")).Bold(true),
+			Title:     lipgloss.NewStyle().Foreground(lipgloss.Color(catppuccinAccent)).Bold(true),
 			Text:      lipgloss.NewStyle().Foreground(lipgloss.Color("#cdd6f4")),
 			Muted:     lipgloss.NewStyle().Foreground(lipgloss.Color("#a6adc8")),
 			Highlight: lipgloss.NewStyle().Foreground(lipgloss.Color("#94e2d5")).Bold(true),
 			Err:       lipgloss.NewStyle().Foreground(lipgloss.Color("#f38ba8")).Bold(true),
 			Warn:      lipgloss.NewStyle().Foreground(lipgloss.Color("#fab387")).Bold(true),
 			Border:    "#45475a",
-			BorderHi:  "#89dceb",
+			BorderHi:  catppuccinAccent,
 			SurfaceBG: "#1e1e2e",
 			Badge:     "#585b70",
-			Input:     "#89dceb",
-			InputBG:   "#313244",
+			Input:     catppuccinAccent,
+			InputBG:   catppuccinSurface,
 			InputFG:   "#f5e0dc",
-			SelectBG:  "#313244",
+			SelectBG:  catppuccinSurface,
 			SelectFG:  "#f5e0dc",
 			BusyFG:    "#a6e3a1",
-			BusyBG:    "#313244",
+			BusyBG:    catppuccinSurface,
 		}
 	default:
 		return theme{

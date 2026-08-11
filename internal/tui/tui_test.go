@@ -1611,15 +1611,15 @@ func TestOpenCommandRevealsPathByPlatform(t *testing.T) {
 	cmd := openCommand(path, true)
 	switch runtime.GOOS {
 	case "windows":
-		if len(cmd.Args) != 2 || cmd.Args[0] != "explorer.exe" || cmd.Args[1] != "/select,"+path {
+		if len(cmd.Args) != 2 || cmd.Args[0] != `C:\Windows\System32\explorer.exe` || cmd.Args[1] != "/select,"+path {
 			t.Fatalf("expected explorer reveal command, got %#v", cmd.Args)
 		}
 	case "darwin":
-		if len(cmd.Args) != 3 || cmd.Args[0] != "open" || cmd.Args[1] != "-R" || cmd.Args[2] != path {
+		if len(cmd.Args) != 3 || cmd.Args[0] != "/usr/bin/open" || cmd.Args[1] != "-R" || cmd.Args[2] != path {
 			t.Fatalf("expected macOS reveal command, got %#v", cmd.Args)
 		}
 	default:
-		if len(cmd.Args) != 2 || cmd.Args[0] != "xdg-open" || cmd.Args[1] != "/tmp" {
+		if len(cmd.Args) != 2 || cmd.Args[0] != "/usr/bin/"+xdgOpenName || cmd.Args[1] != "/tmp" {
 			t.Fatalf("expected xdg-open parent command, got %#v", cmd.Args)
 		}
 	}

@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	// Register the SQLite driver used by database/sql.
 	_ "modernc.org/sqlite"
 )
 
@@ -47,43 +48,11 @@ func TestMigrationRunnerResumesExistingGooseVersionTable(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "partial.db")
 
-	sqlDB, err := sql.Open("sqlite", dbPath)
+	status, err := preparePartialMigrations(ctx, dbPath, 3)
 	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
+		t.Fatalf("prepare partial migrations: %v", err)
 	}
-	if err := ensureMigrationTable(ctx, sqlDB); err != nil {
-		t.Fatalf("create goose table: %v", err)
-	}
-	migrations, err := loadMigrations()
-	if err != nil {
-		t.Fatalf("load migrations: %v", err)
-	}
-	for _, item := range migrations[:3] {
-		if _, err := sqlDB.ExecContext(ctx, item.SQL); err != nil {
-			t.Fatalf("apply legacy migration %s: %v", item.Name, err)
-		}
-		if _, err := sqlDB.ExecContext(ctx, `
-			INSERT INTO goose_db_version(version_id, is_applied)
-			VALUES (?, 1)`, item.Version); err != nil {
-			t.Fatalf("record legacy migration %s: %v", item.Name, err)
-		}
-	}
-	status, err := collectMigrationStatus(ctx, sqlDB)
-	if err != nil {
-		t.Fatalf("collect partial status: %v", err)
-	}
-	for index, item := range status {
-		want := "pending"
-		if index < 3 {
-			want = "up"
-		}
-		if item.State != want {
-			t.Fatalf("migration %d: expected state %q, got %#v", item.Version, want, item)
-		}
-	}
-	if err := sqlDB.Close(); err != nil {
-		t.Fatalf("close sqlite: %v", err)
-	}
+	assertMigrationStates(t, status, 3)
 
 	store, err := Open(ctx, dbPath)
 	if err != nil {
@@ -99,5 +68,42 @@ func TestMigrationRunnerResumesExistingGooseVersionTable(t *testing.T) {
 	}
 	if version != 5 {
 		t.Fatalf("expected resumed schema version 5, got %d", version)
+	}
+}
+
+func preparePartialMigrations(ctx context.Context, dbPath string, count int) ([]MigrationStatus, error) {
+	sqlDB, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = sqlDB.Close() }()
+	if err := ensureMigrationTable(ctx, sqlDB); err != nil {
+		return nil, err
+	}
+	migrations, err := loadMigrations()
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range migrations[:count] {
+		if _, err := sqlDB.ExecContext(ctx, item.SQL); err != nil {
+			return nil, err
+		}
+		if _, err := sqlDB.ExecContext(ctx, recordMigrationSQL, item.Version); err != nil {
+			return nil, err
+		}
+	}
+	return collectMigrationStatus(ctx, sqlDB)
+}
+
+func assertMigrationStates(t *testing.T, status []MigrationStatus, applied int) {
+	t.Helper()
+	for index, item := range status {
+		want := "pending"
+		if index < applied {
+			want = "up"
+		}
+		if item.State != want {
+			t.Fatalf("migration %d: expected state %q, got %#v", item.Version, want, item)
+		}
 	}
 }

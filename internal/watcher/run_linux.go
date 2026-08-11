@@ -19,23 +19,9 @@ import (
 )
 
 func (w *Watcher) Run(ctx context.Context, root string) error {
-	if w.store == nil {
-		return errors.New("watcher store is required")
-	}
-	if strings.TrimSpace(root) == "" {
-		return errors.New("watch root is required")
-	}
-
-	absRoot, err := filepath.Abs(root)
+	absRoot, err := validateLinuxWatchRoot(w.store, root)
 	if err != nil {
 		return err
-	}
-	info, err := os.Stat(absRoot)
-	if err != nil {
-		return fmt.Errorf("open watch root %q: %w", absRoot, err)
-	}
-	if !info.IsDir() {
-		return fmt.Errorf("watch root %q is not a directory", absRoot)
 	}
 
 	notifier, err := fsnotify.NewWatcher()
@@ -48,22 +34,34 @@ func (w *Watcher) Run(ctx context.Context, root string) error {
 	if err := addWatchTree(notifier, watched, absRoot); err != nil {
 		return err
 	}
+	return w.runLinuxEvents(ctx, notifier, watched, absRoot)
+}
+
+func validateLinuxWatchRoot(store *db.Store, root string) (string, error) {
+	if store == nil {
+		return "", errors.New("watcher store is required")
+	}
+	if strings.TrimSpace(root) == "" {
+		return "", errors.New("watch root is required")
+	}
+	absRoot, err := filepath.Abs(root)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(absRoot)
+	if err != nil {
+		return "", fmt.Errorf("open watch root %q: %w", absRoot, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("watch root %q is not a directory", absRoot)
+	}
+	return absRoot, nil
+}
+
+func (w *Watcher) runLinuxEvents(ctx context.Context, notifier *fsnotify.Watcher, watched map[string]struct{}, root string) error {
 	pending := make(map[string]fsnotify.Op)
 	var debounceTimer *time.Timer
 	var debounceC <-chan time.Time
-	flush := func() error {
-		if len(pending) == 0 {
-			return nil
-		}
-		batch := pending
-		pending = make(map[string]fsnotify.Op)
-		for path, op := range batch {
-			if err := w.applyLinuxEvent(ctx, notifier, watched, absRoot, fsnotify.Event{Name: path, Op: op}); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
 
 	for {
 		select {
@@ -73,39 +71,60 @@ func (w *Watcher) Run(ctx context.Context, root string) error {
 			if !ok {
 				return errors.New("inotify error channel closed")
 			}
-			if errors.Is(err, fsnotify.ErrEventOverflow) {
-				return fmt.Errorf("inotify events were lost: %w\nhint: run ge scan --root %q to reconcile the index", err, absRoot)
-			}
-			if isWatchLimitError(err) {
-				return fmt.Errorf("inotify watch limit reached: %w\nhint: increase fs.inotify.max_user_watches or scan a smaller root", err)
-			}
-			return fmt.Errorf("inotify watcher error: %w", err)
+			return linuxNotifierError(err, root)
 		case event, ok := <-notifier.Events:
 			if !ok {
 				return errors.New("inotify event channel closed")
 			}
 			path := filepath.Clean(event.Name)
 			pending[path] |= event.Op
-			if debounceTimer == nil {
-				debounceTimer = time.NewTimer(50 * time.Millisecond)
-				debounceC = debounceTimer.C
-			} else {
-				if !debounceTimer.Stop() {
-					select {
-					case <-debounceTimer.C:
-					default:
-					}
-				}
-				debounceTimer.Reset(50 * time.Millisecond)
-				debounceC = debounceTimer.C
-			}
+			resetDebounceTimer(&debounceTimer, &debounceC)
 		case <-debounceC:
-			if err := flush(); err != nil {
+			if err := w.flushLinuxEvents(ctx, notifier, watched, root, pending); err != nil {
 				return err
 			}
 			debounceC = nil
 		}
 	}
+}
+
+func linuxNotifierError(err error, root string) error {
+	if errors.Is(err, fsnotify.ErrEventOverflow) {
+		return fmt.Errorf("inotify events were lost: %w\nhint: run ge scan --root %q to reconcile the index", err, root)
+	}
+	if isWatchLimitError(err) {
+		return fmt.Errorf("inotify watch limit reached: %w\nhint: increase fs.inotify.max_user_watches or scan a smaller root", err)
+	}
+	return fmt.Errorf("inotify watcher error: %w", err)
+}
+
+func resetDebounceTimer(timer **time.Timer, channel *<-chan time.Time) {
+	if *timer == nil {
+		*timer = time.NewTimer(50 * time.Millisecond)
+		*channel = (*timer).C
+		return
+	}
+	if !(*timer).Stop() {
+		select {
+		case <-(*timer).C:
+		default:
+		}
+	}
+	(*timer).Reset(50 * time.Millisecond)
+	*channel = (*timer).C
+}
+
+func (w *Watcher) flushLinuxEvents(ctx context.Context, notifier *fsnotify.Watcher, watched map[string]struct{}, root string, pending map[string]fsnotify.Op) error {
+	if len(pending) == 0 {
+		return nil
+	}
+	for path, op := range pending {
+		if err := w.applyLinuxEvent(ctx, notifier, watched, root, fsnotify.Event{Name: path, Op: op}); err != nil {
+			return err
+		}
+	}
+	clear(pending)
+	return nil
 }
 
 func addWatchTree(notifier *fsnotify.Watcher, watched map[string]struct{}, root string) error {
@@ -141,30 +160,13 @@ func addWatchTree(notifier *fsnotify.Watcher, watched map[string]struct{}, root 
 func (w *Watcher) applyLinuxEvent(ctx context.Context, notifier *fsnotify.Watcher, watched map[string]struct{}, root string, event fsnotify.Event) error {
 	path := filepath.Clean(event.Name)
 	if event.Has(fsnotify.Remove) || event.Has(fsnotify.Rename) {
-		if _, isDir := watched[path]; isDir {
-			if err := deleteWatchedPrefix(ctx, w.store, path); err != nil {
-				return err
-			}
-			removeWatchedPrefix(watched, path)
-		} else if err := deleteWatchedPath(ctx, w.store, path); err != nil {
-			return err
-		}
-		return nil
+		return w.removeLinuxPath(ctx, watched, path)
 	}
 
 	if event.Has(fsnotify.Create) {
-		info, err := os.Stat(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
+		created, err := w.handleLinuxCreate(ctx, notifier, watched, path)
+		if err != nil || created {
 			return err
-		}
-		if info.IsDir() {
-			if err := addWatchTree(notifier, watched, path); err != nil {
-				return err
-			}
-			return w.scanChangedDirectory(ctx, path)
 		}
 	}
 
@@ -172,6 +174,34 @@ func (w *Watcher) applyLinuxEvent(ctx context.Context, notifier *fsnotify.Watche
 		return upsertLinuxPath(ctx, w.store, root, path)
 	}
 	return nil
+}
+
+func (w *Watcher) removeLinuxPath(ctx context.Context, watched map[string]struct{}, path string) error {
+	if _, isDir := watched[path]; isDir {
+		if err := deleteWatchedPrefix(ctx, w.store, path); err != nil {
+			return err
+		}
+		removeWatchedPrefix(watched, path)
+		return nil
+	}
+	return deleteWatchedPath(ctx, w.store, path)
+}
+
+func (w *Watcher) handleLinuxCreate(ctx context.Context, notifier *fsnotify.Watcher, watched map[string]struct{}, path string) (bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return true, nil
+		}
+		return true, err
+	}
+	if !info.IsDir() {
+		return false, nil
+	}
+	if err := addWatchTree(notifier, watched, path); err != nil {
+		return true, err
+	}
+	return true, w.scanChangedDirectory(ctx, path)
 }
 
 func (w *Watcher) scanChangedDirectory(ctx context.Context, path string) error {

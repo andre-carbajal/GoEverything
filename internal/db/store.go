@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	// Register the SQLite driver used by database/sql.
 	_ "modernc.org/sqlite"
 )
 
@@ -38,8 +39,26 @@ type Store struct {
 }
 
 const (
-	maxTransactionAttempts = 6
-	transactionRetryDelay  = 20 * time.Millisecond
+	maxTransactionAttempts       = 6
+	transactionRetryDelay        = 20 * time.Millisecond
+	recalculateDirectorySizesSQL = `
+		WITH indexed_entries AS (
+			SELECT
+				e.id,
+				CASE
+					WHEN substr(d.path, length(d.path), 1) = ? THEN d.path || e.name
+					ELSE d.path || ? || e.name
+				END AS full_path
+			FROM entries AS e
+			JOIN directories AS d ON d.id = e.dir_id
+		)
+		SELECT target.path, e.size
+		FROM directory_size_targets AS target
+		JOIN indexed_entries AS i
+			ON i.full_path = target.path
+			OR substr(i.full_path, 1, length(target.prefix)) = target.prefix
+		JOIN entries AS e ON e.id = i.id
+		WHERE e.is_dir = 0`
 )
 
 func Open(ctx context.Context, dbPath string) (*Store, error) {
@@ -131,6 +150,26 @@ func (s *Store) migrateLegacyPathSchema(ctx context.Context) error {
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	if err := prepareLegacyPathSchema(ctx, tx); err != nil {
+		return err
+	}
+	if err := copyLegacyEntries(ctx, tx); err != nil {
+		return err
+	}
+	if err := swapLegacyPathSchema(ctx, tx); err != nil {
+		return err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx, `VACUUM;`); err != nil {
+		return err
+	}
+	return s.ReindexFTS(ctx)
+}
+
+func prepareLegacyPathSchema(ctx context.Context, tx *sql.Tx) error {
 	setup := []string{
 		`DROP TRIGGER IF EXISTS entries_ai;`,
 		`DROP TRIGGER IF EXISTS entries_ad;`,
@@ -159,7 +198,10 @@ func (s *Store) migrateLegacyPathSchema(ctx context.Context) error {
 			return err
 		}
 	}
+	return nil
+}
 
+func copyLegacyEntries(ctx context.Context, tx *sql.Tx) error {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT id, name, path, ext, size, mtime, is_dir, root, indexed_at
 		FROM entries
@@ -174,13 +216,11 @@ func (s *Store) migrateLegacyPathSchema(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = insertDir.Close() }()
-
 	selectDirID, err := tx.PrepareContext(ctx, `SELECT id FROM directories WHERE path = ?`)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = selectDirID.Close() }()
-
 	insertEntry, err := tx.PrepareContext(ctx, `
 		INSERT INTO entries_v2(id, name, dir_id, ext, size, mtime, is_dir, root, indexed_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`)
@@ -190,59 +230,50 @@ func (s *Store) migrateLegacyPathSchema(ctx context.Context) error {
 	defer func() { _ = insertEntry.Close() }()
 
 	for rows.Next() {
-		var (
-			id        int64
-			name      string
-			fullPath  string
-			ext       string
-			size      int64
-			mtime     int64
-			isDirInt  int
-			root      string
-			indexedAt int64
-		)
-		if err := rows.Scan(&id, &name, &fullPath, &ext, &size, &mtime, &isDirInt, &root, &indexedAt); err != nil {
-			return err
-		}
-
-		dirPath, baseName := splitPath(fullPath)
-		if baseName == "" || baseName == "." {
-			baseName = name
-		}
-		if _, err := insertDir.ExecContext(ctx, dirPath); err != nil {
-			return err
-		}
-
-		var dirID int64
-		if err := selectDirID.QueryRowContext(ctx, dirPath).Scan(&dirID); err != nil {
-			return err
-		}
-
-		if _, err := insertEntry.ExecContext(ctx, id, baseName, dirID, ext, size, mtime, isDirInt, root, indexedAt); err != nil {
+		if err := copyLegacyEntry(ctx, rows, insertDir, selectDirID, insertEntry); err != nil {
 			return err
 		}
 	}
-	if err := rows.Err(); err != nil {
+	return rows.Err()
+}
+
+func copyLegacyEntry(ctx context.Context, rows *sql.Rows, insertDir, selectDirID, insertEntry *sql.Stmt) error {
+	var (
+		id        int64
+		name      string
+		fullPath  string
+		ext       string
+		size      int64
+		mtime     int64
+		isDirInt  int
+		root      string
+		indexedAt int64
+	)
+	if err := rows.Scan(&id, &name, &fullPath, &ext, &size, &mtime, &isDirInt, &root, &indexedAt); err != nil {
 		return err
 	}
-
-	swap := []string{
-		`DROP TABLE entries;`,
-		`ALTER TABLE entries_v2 RENAME TO entries;`,
+	dirPath, baseName := splitPath(fullPath)
+	if baseName == "" || baseName == "." {
+		baseName = name
 	}
-	for _, stmt := range swap {
+	if _, err := insertDir.ExecContext(ctx, dirPath); err != nil {
+		return err
+	}
+	var dirID int64
+	if err := selectDirID.QueryRowContext(ctx, dirPath).Scan(&dirID); err != nil {
+		return err
+	}
+	_, err := insertEntry.ExecContext(ctx, id, baseName, dirID, ext, size, mtime, isDirInt, root, indexedAt)
+	return err
+}
+
+func swapLegacyPathSchema(ctx context.Context, tx *sql.Tx) error {
+	for _, stmt := range []string{`DROP TABLE entries;`, `ALTER TABLE entries_v2 RENAME TO entries;`} {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
 			return err
 		}
 	}
-
-	if err := tx.Commit(); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `VACUUM;`); err != nil {
-		return err
-	}
-	return s.ReindexFTS(ctx)
+	return nil
 }
 
 func (s *Store) tableExists(ctx context.Context, table string) (bool, error) {
@@ -252,27 +283,18 @@ func (s *Store) tableExists(ctx context.Context, table string) (bool, error) {
 }
 
 func (s *Store) tableHasColumn(ctx context.Context, table, column string) (bool, error) {
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	rows, err := s.db.QueryContext(ctx, `SELECT name FROM pragma_table_info(?) WHERE name = ?`, table, column)
 	if err != nil {
 		return false, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	for rows.Next() {
-		var (
-			cid       int
-			name      string
-			typ       string
-			notNull   int
-			dfltValue any
-			pk        int
-		)
-		if err := rows.Scan(&cid, &name, &typ, &notNull, &dfltValue, &pk); err != nil {
+	if rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
 			return false, err
 		}
-		if name == column {
-			return true, nil
-		}
+		return name == column, nil
 	}
 	if err := rows.Err(); err != nil {
 		return false, err
@@ -328,37 +350,47 @@ func (s *Store) withTxOnce(ctx context.Context, fn func(*sql.Tx) error) error {
 func upsertBatchTx(ctx context.Context, tx *sql.Tx, entries []Entry) error {
 	now := time.Now().Unix()
 
-	dirSet := make(map[string]struct{}, len(entries))
+	dirPaths := make(map[string]struct{}, len(entries))
 	for _, entry := range entries {
 		dirPath, _ := splitPath(entry.Path)
-		dirSet[dirPath] = struct{}{}
+		dirPaths[dirPath] = struct{}{}
 	}
-
-	insertDir, err := tx.PrepareContext(ctx, `INSERT INTO directories(path) VALUES (?) ON CONFLICT(path) DO NOTHING`)
+	dirIDByPath, err := ensureDirectoryIDs(ctx, tx, dirPaths)
 	if err != nil {
 		return err
+	}
+	return insertBatchEntries(ctx, tx, entries, dirIDByPath, now)
+}
+
+func ensureDirectoryIDs(ctx context.Context, tx *sql.Tx, paths map[string]struct{}) (map[string]int64, error) {
+	insertDir, err := tx.PrepareContext(ctx, `INSERT INTO directories(path) VALUES (?) ON CONFLICT(path) DO NOTHING`)
+	if err != nil {
+		return nil, err
 	}
 	defer func() { _ = insertDir.Close() }()
 	selectDirID, err := tx.PrepareContext(ctx, `SELECT id FROM directories WHERE path = ?`)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer func() { _ = selectDirID.Close() }()
-	for path := range dirSet {
+	for path := range paths {
 		if _, err := insertDir.ExecContext(ctx, path); err != nil {
-			return err
+			return nil, err
 		}
 	}
 
-	dirIDByPath := make(map[string]int64, len(dirSet))
-	for path := range dirSet {
+	dirIDByPath := make(map[string]int64, len(paths))
+	for path := range paths {
 		var id int64
 		if err := selectDirID.QueryRowContext(ctx, path).Scan(&id); err != nil {
-			return err
+			return nil, err
 		}
 		dirIDByPath[path] = id
 	}
+	return dirIDByPath, nil
+}
 
+func insertBatchEntries(ctx context.Context, tx *sql.Tx, entries []Entry, dirIDByPath map[string]int64, now int64) error {
 	entryStmt, err := tx.PrepareContext(ctx, `
 		INSERT INTO entries(name, dir_id, ext, size, mtime, is_dir, root, indexed_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
@@ -402,7 +434,7 @@ func (s *Store) UpdateDirectorySizes(ctx context.Context, sizes map[string]int64
 		return nil
 	}
 	return s.withTx(ctx, func(tx *sql.Tx) error {
-		return updateDirectoryValuesTx(ctx, tx, "directory_size_updates", cleanSizes, false)
+		return updateDirectoryValuesTx(ctx, tx, cleanSizes, false)
 	})
 }
 
@@ -429,7 +461,7 @@ func (s *Store) UpsertBatchWithDirectorySizes(ctx context.Context, entries []Ent
 		if err := upsertBatchTx(ctx, tx, entries); err != nil {
 			return err
 		}
-		return updateDirectoryValuesTx(ctx, tx, "directory_size_deltas", deltas, true)
+		return updateDirectoryValuesTx(ctx, tx, deltas, true)
 	})
 }
 
@@ -455,7 +487,7 @@ func (s *Store) DeleteByPrefixWithDirectorySize(ctx context.Context, prefix stri
 		if total != 0 {
 			deltas := make(map[string]int64)
 			addAncestorDeltaForDir(deltas, filepath.Dir(prefix), -total)
-			if err := updateDirectoryValuesTx(ctx, tx, "directory_size_deltas", deltas, true); err != nil {
+			if err := updateDirectoryValuesTx(ctx, tx, deltas, true); err != nil {
 				return err
 			}
 		}
@@ -473,66 +505,79 @@ func (s *Store) RecalculateDirectorySizes(ctx context.Context, roots []string) e
 	}
 
 	return s.withTx(ctx, func(tx *sql.Tx) error {
-		directories := make(map[string]int64)
-		for _, root := range roots {
-			for dir := filepath.Clean(root); ; {
-				exists, err := directoryEntryExistsTx(ctx, tx, dir)
-				if err != nil {
-					return err
-				}
-				if !exists {
-					break
-				}
-				directories[dir] = 0
-				parent := filepath.Dir(dir)
-				if parent == dir {
-					break
-				}
-				dir = parent
-			}
+		directories, err := collectDirectorySizes(ctx, tx, roots)
+		if err != nil {
+			return err
 		}
 		if len(directories) == 0 {
 			return nil
 		}
 
-		clauses := make([]string, 0, len(directories))
-		args := []any{pathSeparator(), pathSeparator()}
-		for path := range directories {
-			prefix := pathPrefix(path)
-			clauses = append(clauses, `(i.full_path = ? OR substr(i.full_path, 1, length(?)) = ?)`)
-			args = append(args, path, prefix, prefix)
-		}
-		query := fullPathCTE() + `
-			SELECT i.full_path, e.size
-			FROM indexed_entries AS i
-			JOIN entries AS e ON e.id = i.id
-			WHERE e.is_dir = 0 AND (` + strings.Join(clauses, " OR ") + `)`
-		rows, err := tx.QueryContext(ctx, query, args...)
-		if err != nil {
+		if err := createDirectorySizeTargets(ctx, tx, directories); err != nil {
 			return err
 		}
-		for rows.Next() {
-			var path string
-			var size int64
-			if err := rows.Scan(&path, &size); err != nil {
-				_ = rows.Close()
-				return err
-			}
-			for dir := range directories {
-				if isWithinPath(dir, path) {
-					directories[dir] += size
-				}
-			}
-		}
-		if err := rows.Err(); err != nil {
-			_ = rows.Close()
+		defer func() { _, _ = tx.ExecContext(context.Background(), `DROP TABLE IF EXISTS directory_size_targets`) }()
+		if err := collectDirectorySizeTotals(ctx, tx, directories); err != nil {
 			return err
 		}
-		if err := rows.Close(); err != nil {
-			return err
-		}
-		return updateDirectoryValuesTx(ctx, tx, "directory_size_updates", directories, false)
+		return updateDirectoryValuesTx(ctx, tx, directories, false)
 	})
+}
+
+func collectDirectorySizeTotals(ctx context.Context, tx *sql.Tx, directories map[string]int64) error {
+	rows, err := tx.QueryContext(ctx, recalculateDirectorySizesSQL, pathSeparator(), pathSeparator())
+	if err != nil {
+		return err
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var root string
+		var size int64
+		if err := rows.Scan(&root, &size); err != nil {
+			return err
+		}
+		directories[root] += size
+	}
+	return rows.Err()
+}
+
+func collectDirectorySizes(ctx context.Context, tx *sql.Tx, roots []string) (map[string]int64, error) {
+	directories := make(map[string]int64)
+	for _, root := range roots {
+		for dir := filepath.Clean(root); ; {
+			exists, err := directoryEntryExistsTx(ctx, tx, dir)
+			if err != nil {
+				return nil, err
+			}
+			if !exists {
+				break
+			}
+			directories[dir] = 0
+			parent := filepath.Dir(dir)
+			if parent == dir {
+				break
+			}
+			dir = parent
+		}
+	}
+	return directories, nil
+}
+
+func createDirectorySizeTargets(ctx context.Context, tx *sql.Tx, directories map[string]int64) error {
+	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE directory_size_targets (path TEXT PRIMARY KEY, prefix TEXT NOT NULL)`); err != nil {
+		return err
+	}
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO directory_size_targets(path, prefix) VALUES (?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = stmt.Close() }()
+	for path := range directories {
+		if _, err := stmt.ExecContext(ctx, path, pathPrefix(path)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 type txExecutor interface {
@@ -542,16 +587,16 @@ type txExecutor interface {
 	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
 }
 
-func updateDirectoryValuesTx(ctx context.Context, tx txExecutor, table string, values map[string]int64, delta bool) error {
+func updateDirectoryValuesTx(ctx context.Context, tx txExecutor, values map[string]int64, delta bool) error {
 	if len(values) == 0 {
 		return nil
 	}
-	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE `+table+` (path TEXT PRIMARY KEY, value INTEGER NOT NULL)`); err != nil {
+	if _, err := tx.ExecContext(ctx, `CREATE TEMP TABLE directory_size_values (path TEXT PRIMARY KEY, value INTEGER NOT NULL)`); err != nil {
 		return err
 	}
-	defer func() { _, _ = tx.ExecContext(context.Background(), `DROP TABLE IF EXISTS `+table) }()
+	defer func() { _, _ = tx.ExecContext(context.Background(), `DROP TABLE IF EXISTS directory_size_values`) }()
 
-	stmt, err := tx.PrepareContext(ctx, `INSERT INTO `+table+`(path, value) VALUES (?, ?) ON CONFLICT(path) DO UPDATE SET value = excluded.value`)
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO directory_size_values(path, value) VALUES (?, ?) ON CONFLICT(path) DO UPDATE SET value = excluded.value`)
 	if err != nil {
 		return err
 	}
@@ -569,15 +614,13 @@ func updateDirectoryValuesTx(ctx context.Context, tx txExecutor, table string, v
 		return err
 	}
 
-	operator := "value"
-	if delta {
-		operator = "CASE WHEN entries.size + value < 0 THEN 0 ELSE entries.size + value END"
-	}
 	query := fullPathCTE() + `
 		UPDATE entries
-		SET size = (SELECT ` + operator + `
-			FROM ` + table + `
-			WHERE ` + table + `.path = (
+		SET size = (SELECT CASE WHEN ? THEN
+				CASE WHEN entries.size + value < 0 THEN 0 ELSE entries.size + value END
+			ELSE value END
+			FROM directory_size_values
+			WHERE directory_size_values.path = (
 				SELECT indexed_entries.full_path
 				FROM indexed_entries
 				WHERE indexed_entries.id = entries.id
@@ -586,9 +629,9 @@ func updateDirectoryValuesTx(ctx context.Context, tx txExecutor, table string, v
 		  AND id IN (
 			SELECT indexed_entries.id
 			FROM indexed_entries
-			JOIN ` + table + ` ON ` + table + `.path = indexed_entries.full_path
+			JOIN directory_size_values ON directory_size_values.path = indexed_entries.full_path
 		)`
-	_, err = tx.ExecContext(ctx, query, pathSeparator(), pathSeparator())
+	_, err = tx.ExecContext(ctx, query, pathSeparator(), pathSeparator(), delta)
 	return err
 }
 

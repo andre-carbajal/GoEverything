@@ -6,7 +6,8 @@ BINARY="ge"
 PROJECT="goeverything"
 
 need_cmd() {
-  command -v "$1" >/dev/null 2>&1 || { echo "error: $1 is required" >&2; exit 1; }
+	local command_name="$1"
+	command -v "$command_name" >/dev/null 2>&1 || { echo "error: $command_name is required" >&2; exit 1; }
 }
 
 need_cmd curl
@@ -28,7 +29,7 @@ esac
 
 TAG="${1:-}"
 if [[ -z "$TAG" ]]; then
-  TAG="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
+	TAG="$(curl --proto '=https' --tlsv1.2 -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
 fi
 
 if [[ -z "$TAG" ]]; then
@@ -44,7 +45,7 @@ TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT
 
 echo "Downloading ${URL}..."
-curl -fL "$URL" -o "$TMP_DIR/$ASSET"
+curl --proto '=https' --tlsv1.2 -fL "$URL" -o "$TMP_DIR/$ASSET"
 tar -xzf "$TMP_DIR/$ASSET" -C "$TMP_DIR"
 
 if [[ ! -f "$TMP_DIR/$BINARY" ]]; then

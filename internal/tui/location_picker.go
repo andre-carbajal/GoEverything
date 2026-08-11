@@ -61,54 +61,73 @@ func (m model) selectLocationRoot(index int) (model, tea.Cmd) {
 
 func (m model) updateLocation(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	inputEmpty := strings.TrimSpace(m.locationInput.Value()) == ""
+	if updated, cmd, handled := m.handleLocationNavigation(msg.String(), inputEmpty); handled {
+		return updated, cmd
+	}
+	return m.updateLocationInput(msg)
+}
 
-	switch msg.String() {
+func (m model) handleLocationNavigation(key string, inputEmpty bool) (model, tea.Cmd, bool) {
+	switch key {
 	case "esc":
 		m.locationInput.Blur()
 		m.err = nil
-		if m.locationScanLabel == "manual-scan" {
-			return m.focusSearchView(), nil
+		if m.locationScanLabel == manualScanLabel {
+			return m.focusSearchView(), nil, true
 		}
-		return m, tea.Quit
+		return m, tea.Quit, true
 	case "up":
-		if inputEmpty {
-			m.locationRootCursor = max(0, m.locationRootCursor-1)
-		} else if len(m.locationSuggestions) > 0 {
-			m.locationSuggestionActive = true
-			if m.locationSuggestionCursor < 0 {
-				m.locationSuggestionCursor = 0
-			} else {
-				m.locationSuggestionCursor = max(0, m.locationSuggestionCursor-1)
-			}
-		}
-		return m, nil
 	case "down":
-		if inputEmpty {
-			m.locationRootCursor = min(max(0, len(m.locationRoots)-1), m.locationRootCursor+1)
-		} else if len(m.locationSuggestions) > 0 {
-			m.locationSuggestionActive = true
-			m.locationSuggestionCursor = min(len(m.locationSuggestions)-1, max(0, m.locationSuggestionCursor+1))
-		}
-		return m, nil
+		return m.moveLocationCursor(key, inputEmpty), nil, true
 	case "tab", "right":
 		if !inputEmpty && len(m.locationSuggestions) > 0 {
 			index := m.locationSuggestionCursor
 			if index < 0 {
 				index = 0
 			}
-			return m.acceptLocationSuggestion(index)
+			updated, cmd := m.acceptLocationSuggestion(index)
+			return updated, cmd, true
 		}
-		return m, nil
+		return m, nil, true
 	case "enter":
 		if inputEmpty {
-			return m.selectLocationRoot(m.locationRootCursor)
+			updated, cmd := m.selectLocationRoot(m.locationRootCursor)
+			return updated, cmd, true
 		}
 		if m.locationSuggestionActive && m.locationSuggestionCursor >= 0 && m.locationSuggestionCursor < len(m.locationSuggestions) {
-			return m.confirmLocationPath(m.locationSuggestions[m.locationSuggestionCursor])
+			updated, cmd := m.confirmLocationPath(m.locationSuggestions[m.locationSuggestionCursor])
+			return updated, cmd, true
 		}
-		return m.confirmLocation()
+		updated, cmd := m.confirmLocation()
+		return updated, cmd, true
 	}
+	return m, nil, false
+}
 
+func (m model) moveLocationCursor(key string, inputEmpty bool) model {
+	if inputEmpty {
+		if key == "up" {
+			m.locationRootCursor = max(0, m.locationRootCursor-1)
+		} else {
+			m.locationRootCursor = min(max(0, len(m.locationRoots)-1), m.locationRootCursor+1)
+		}
+		return m
+	}
+	if len(m.locationSuggestions) == 0 {
+		return m
+	}
+	m.locationSuggestionActive = true
+	if key == "up" && m.locationSuggestionCursor < 0 {
+		m.locationSuggestionCursor = 0
+	} else if key == "up" {
+		m.locationSuggestionCursor = max(0, m.locationSuggestionCursor-1)
+	} else {
+		m.locationSuggestionCursor = min(len(m.locationSuggestions)-1, max(0, m.locationSuggestionCursor+1))
+	}
+	return m
+}
+
+func (m model) updateLocationInput(msg tea.KeyMsg) (model, tea.Cmd) {
 	var cmd tea.Cmd
 	m.locationInput, cmd = m.locationInput.Update(msg)
 	m.locationInput = cleanMouseSequences(m.locationInput)
@@ -162,7 +181,7 @@ func (m model) confirmLocationPath(value string) (model, tea.Cmd) {
 	m.activeScanRoot = root
 	m.err = nil
 	m.startupScanAttempted = true
-	if m.locationScanLabel == "manual-scan" {
+	if m.locationScanLabel == manualScanLabel {
 		m.status = "manual scan in progress…"
 	} else {
 		m.status = "initial scan in progress…"
@@ -190,42 +209,7 @@ func (m model) viewLocation(width, height int) string {
 		"",
 		m.locationInputView(width),
 	}
-
-	if strings.TrimSpace(m.locationInput.Value()) == "" {
-		lines = append(lines, "", m.theme.Title.Render("QUICK LOCATIONS"))
-		start, end := locationVisibleRange(len(m.locationRoots), m.locationRootCursor, max(1, height-10))
-		for i := start; i < end; i++ {
-			root := m.locationRoots[i]
-			prefix := "  "
-			style := m.theme.Text
-			if i == m.locationRootCursor {
-				prefix = "➜ "
-				style = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SelectBG).Bold(true)
-			} else if m.mouseHoverMatches(mouseTargetLocationRoot, i) {
-				style = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SurfaceBG)
-			}
-			lines = append(lines, style.Render(prefix+locationRootLabel(root)))
-		}
-	} else {
-		lines = append(lines, "", m.theme.Title.Render("FOLDERS"))
-		if len(m.locationSuggestions) == 0 {
-			lines = append(lines, m.theme.Muted.Render("No accessible folders match this path."))
-		} else {
-			start, end := locationVisibleRange(len(m.locationSuggestions), m.locationSuggestionCursor, max(1, height-10))
-			for i := start; i < end; i++ {
-				suggestion := m.locationSuggestions[i]
-				prefix := "  "
-				style := m.theme.Text
-				if m.locationSuggestionActive && i == m.locationSuggestionCursor {
-					prefix = "➜ "
-					style = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SelectBG).Bold(true)
-				} else if m.mouseHoverMatches(mouseTargetLocationSuggestion, i) {
-					style = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SurfaceBG)
-				}
-				lines = append(lines, style.Render(prefix+trimMiddle(suggestion, max(16, min(96, width-16)))))
-			}
-		}
-	}
+	lines = append(lines, m.locationListLines(width, height)...)
 
 	if m.err != nil {
 		lines = append(lines, "", m.theme.Err.Render(trimMiddle("error: "+m.err.Error(), max(20, width-12))))
@@ -237,6 +221,52 @@ func (m model) viewLocation(width, height int) string {
 		Height(cardHeight).
 		Render(strings.Join(lines, "\n"))
 	return lipgloss.Place(width, height, lipgloss.Center, lipgloss.Center, card)
+}
+
+func (m model) locationListLines(width, height int) []string {
+	if strings.TrimSpace(m.locationInput.Value()) == "" {
+		return m.quickLocationLines(height)
+	}
+	return m.locationSuggestionLines(width, height)
+}
+
+func (m model) quickLocationLines(height int) []string {
+	lines := []string{"", m.theme.Title.Render("QUICK LOCATIONS")}
+	start, end := locationVisibleRange(len(m.locationRoots), m.locationRootCursor, max(1, height-10))
+	for i := start; i < end; i++ {
+		root := m.locationRoots[i]
+		prefix := "  "
+		style := m.theme.Text
+		if i == m.locationRootCursor {
+			prefix = "➜ "
+			style = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SelectBG).Bold(true)
+		} else if m.mouseHoverMatches(mouseTargetLocationRoot, i) {
+			style = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SurfaceBG)
+		}
+		lines = append(lines, style.Render(prefix+locationRootLabel(root)))
+	}
+	return lines
+}
+
+func (m model) locationSuggestionLines(width, height int) []string {
+	lines := []string{"", m.theme.Title.Render("FOLDERS")}
+	if len(m.locationSuggestions) == 0 {
+		return append(lines, m.theme.Muted.Render("No accessible folders match this path."))
+	}
+	start, end := locationVisibleRange(len(m.locationSuggestions), m.locationSuggestionCursor, max(1, height-10))
+	for i := start; i < end; i++ {
+		suggestion := m.locationSuggestions[i]
+		prefix := "  "
+		style := m.theme.Text
+		if m.locationSuggestionActive && i == m.locationSuggestionCursor {
+			prefix = "➜ "
+			style = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SelectBG).Bold(true)
+		} else if m.mouseHoverMatches(mouseTargetLocationSuggestion, i) {
+			style = lipgloss.NewStyle().Foreground(m.theme.SelectFG).Background(m.theme.SurfaceBG)
+		}
+		lines = append(lines, style.Render(prefix+trimMiddle(suggestion, max(16, min(96, width-16)))))
+	}
+	return lines
 }
 
 func (m model) locationInputView(width int) string {
