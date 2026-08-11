@@ -64,7 +64,7 @@ ge --help
 
 ```bash
 brew tap andre-carbajal/tap
-brew install --cask goeverything
+brew install goeverything
 ```
 
 **Scoop**

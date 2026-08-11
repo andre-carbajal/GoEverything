@@ -103,14 +103,11 @@ changelog:
       - "^test:"
       - "^ci:"
 
-homebrew_casks:
+brews:
   - name: goeverything
     ids:
       - darwin
-    directory: Casks
-    binary: ge
-    conflicts:
-      - formula: goeverything
+    directory: Formula
     repository:
       owner: andre-carbajal
       name: homebrew-tap
@@ -118,6 +115,8 @@ homebrew_casks:
     homepage: https://github.com/andre-carbajal/GoEverything
     description: Fast local file indexing and search
     license: GPL v3
+    test: |
+      system "#{bin}/ge", "--help"
 
 scoops:
   - name: goeverything
