@@ -12,7 +12,18 @@ import (
 	"time"
 )
 
-const migrationsTableName = "goose_db_version"
+const (
+	createMigrationsTableSQL = `CREATE TABLE IF NOT EXISTS goose_db_version (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		version_id INTEGER NOT NULL,
+		is_applied INTEGER NOT NULL,
+		tstamp TIMESTAMP DEFAULT (datetime('now'))
+	)`
+	recordMigrationSQL     = `INSERT INTO goose_db_version(version_id, is_applied) VALUES (?, 1)`
+	listMigrationStatesSQL = `SELECT version_id, is_applied, tstamp
+			FROM goose_db_version
+			ORDER BY id`
+)
 
 //go:embed migrations/*.sql
 var embeddedMigrations embed.FS
@@ -62,8 +73,7 @@ func applyMigrations(ctx context.Context, sqlDB *sql.DB) error {
 			_ = tx.Rollback()
 			return fmt.Errorf("apply migration %s: %w", item.Name, err)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO `+migrationsTableName+`(version_id, is_applied)
-			VALUES (?, 1)`, item.Version); err != nil {
+		if _, err := tx.ExecContext(ctx, recordMigrationSQL, item.Version); err != nil {
 			_ = tx.Rollback()
 			return fmt.Errorf("record migration %s: %w", item.Name, err)
 		}
@@ -129,19 +139,12 @@ type migrationStatus struct {
 }
 
 func ensureMigrationTable(ctx context.Context, sqlDB *sql.DB) error {
-	_, err := sqlDB.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS `+migrationsTableName+` (
-			id INTEGER PRIMARY KEY AUTOINCREMENT,
-			version_id INTEGER NOT NULL,
-			is_applied INTEGER NOT NULL,
-			tstamp TIMESTAMP DEFAULT (datetime('now'))
-		)`)
+	_, err := sqlDB.ExecContext(ctx, createMigrationsTableSQL)
 	return err
 }
 
 func migrationStates(ctx context.Context, sqlDB *sql.DB) (map[int64]migrationState, error) {
-	rows, err := sqlDB.QueryContext(ctx, `SELECT version_id, is_applied, tstamp
-		FROM `+migrationsTableName+`
-		ORDER BY id ASC`)
+	rows, err := sqlDB.QueryContext(ctx, listMigrationStatesSQL)
 	if err != nil {
 		return nil, err
 	}

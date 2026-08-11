@@ -3,14 +3,20 @@
 package tui
 
 import (
-	"strings"
+	"os"
+	"path/filepath"
 	"testing"
 )
 
-func TestStartOpenCommandReportsMissingDesktopOpener(t *testing.T) {
-	t.Setenv("PATH", "")
-	err := startOpenCommand("/tmp/file.txt", false)
-	if err == nil || !strings.Contains(err.Error(), "no desktop opener") {
-		t.Fatalf("expected missing opener error, got %v", err)
+func TestFixedExecutableRequiresAbsoluteExecutablePath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "opener")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write executable: %v", err)
+	}
+	if got := fixedExecutable("opener"); got != "" {
+		t.Fatalf("relative executable unexpectedly resolved to %q", got)
+	}
+	if got := fixedExecutable(path); got != path {
+		t.Fatalf("absolute executable: want %q, got %q", path, got)
 	}
 }

@@ -24,7 +24,13 @@ func DiscoverRoots() []string {
 			return []string{`C:\`}
 		}
 	}
+	if roots := parseLogicalDriveRoots(buf, n); len(roots) > 0 {
+		return roots
+	}
+	return []string{`C:\`}
+}
 
+func parseLogicalDriveRoots(buf []uint16, n uint32) []string {
 	roots := make([]string, 0)
 	start := 0
 	for i := 0; i < int(n); i++ {
@@ -39,9 +45,6 @@ func DiscoverRoots() []string {
 			}
 		}
 		start = i + 1
-	}
-	if len(roots) == 0 {
-		return []string{`C:\`}
 	}
 	sort.Strings(roots)
 	return roots

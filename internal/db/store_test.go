@@ -10,14 +10,50 @@ import (
 	"testing"
 	"time"
 
+	// Register the SQLite driver used by database/sql.
 	_ "modernc.org/sqlite"
 )
+
+const (
+	storeTestDBFile  = "test.db"
+	storeTestMainGo  = "main.go"
+	storeTestIndexJS = "index.js"
+	storeTestOpenDB  = "open db: %v"
+	storeTestUpsert  = "upsert: %v"
+)
+
+func TestTableHasColumnUsesParameterizedPragma(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "columns.db"))
+	if err != nil {
+		t.Fatalf(storeTestOpenDB, err)
+	}
+	defer func() { _ = store.Close() }()
+
+	for _, test := range []struct {
+		table  string
+		column string
+		want   bool
+	}{
+		{table: "entries", column: "dir_id", want: true},
+		{table: "entries", column: "path", want: false},
+		{table: "entries' OR 1=1 --", column: "dir_id", want: false},
+	} {
+		got, err := store.tableHasColumn(ctx, test.table, test.column)
+		if err != nil {
+			t.Fatalf("tableHasColumn(%q, %q): %v", test.table, test.column, err)
+		}
+		if got != test.want {
+			t.Errorf("tableHasColumn(%q, %q): want %t, got %t", test.table, test.column, test.want, got)
+		}
+	}
+}
 
 func TestStoreRetriesBusyTransactions(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "retry.db"))
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf(storeTestOpenDB, err)
 	}
 	defer func() { _ = store.Close() }()
 
@@ -51,11 +87,11 @@ func TestStoreSearchFTSAndWildcard(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "test.db")
+	dbPath := filepath.Join(t.TempDir(), storeTestDBFile)
 
 	store, err := Open(ctx, dbPath)
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf(storeTestOpenDB, err)
 	}
 	defer func() { _ = store.Close() }()
 
@@ -64,7 +100,7 @@ func TestStoreSearchFTSAndWildcard(t *testing.T) {
 		NewEntryFromPath("/tmp", "/tmp/another.log", 20, time.Now(), false),
 	}
 	if err := store.UpsertBatch(ctx, entries); err != nil {
-		t.Fatalf("upsert: %v", err)
+		t.Fatalf(storeTestUpsert, err)
 	}
 
 	res, err := store.SearchAdvanced(ctx, SearchOptions{Query: "my_rep", Limit: 10, Offset: 0})
@@ -88,11 +124,11 @@ func TestStoreSearchAdvancedFiltersAndReindex(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "test.db")
+	dbPath := filepath.Join(t.TempDir(), storeTestDBFile)
 
 	store, err := Open(ctx, dbPath)
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf(storeTestOpenDB, err)
 	}
 	defer func() { _ = store.Close() }()
 
@@ -100,11 +136,11 @@ func TestStoreSearchAdvancedFiltersAndReindex(t *testing.T) {
 	root := testPath("Users", "a")
 	entries := []Entry{
 		NewEntryFromPath(root, filepath.Join(root, "report.txt"), 10, now, false),
-		NewEntryFromPath(root, filepath.Join(root, "src", "main.go"), 20, now, false),
+		NewEntryFromPath(root, filepath.Join(root, "src", storeTestMainGo), 20, now, false),
 		NewEntryFromPath(root, filepath.Join(root, "src"), 0, now, true),
 	}
 	if err := store.UpsertBatch(ctx, entries); err != nil {
-		t.Fatalf("upsert: %v", err)
+		t.Fatalf(storeTestUpsert, err)
 	}
 
 	got, err := store.SearchAdvanced(ctx, SearchOptions{
@@ -128,7 +164,7 @@ func TestStoreSearchAdvancedFiltersAndReindex(t *testing.T) {
 	if err != nil {
 		t.Fatalf("search after reindex: %v", err)
 	}
-	if len(got) != 1 || got[0].Name != "main.go" {
+	if len(got) != 1 || got[0].Name != storeTestMainGo {
 		t.Fatalf("unexpected results after reindex: %+v", got)
 	}
 }
@@ -137,22 +173,22 @@ func TestStoreSearchDoesNotMatchPathSegments(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "test.db")
+	dbPath := filepath.Join(t.TempDir(), storeTestDBFile)
 
 	store, err := Open(ctx, dbPath)
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf(storeTestOpenDB, err)
 	}
 	defer func() { _ = store.Close() }()
 
 	now := time.Now()
 	root := testPath("Users", "a")
 	entries := []Entry{
-		NewEntryFromPath(root, filepath.Join(root, "projects", "go", "main.go"), 20, now, false),
-		NewEntryFromPath(root, filepath.Join(root, "projects", "js", "index.js"), 20, now, false),
+		NewEntryFromPath(root, filepath.Join(root, "projects", "go", storeTestMainGo), 20, now, false),
+		NewEntryFromPath(root, filepath.Join(root, "projects", "js", storeTestIndexJS), 20, now, false),
 	}
 	if err := store.UpsertBatch(ctx, entries); err != nil {
-		t.Fatalf("upsert: %v", err)
+		t.Fatalf(storeTestUpsert, err)
 	}
 
 	got, err := store.SearchAdvanced(ctx, SearchOptions{
@@ -171,11 +207,11 @@ func TestStoreDirectoryDedupAndDelete(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "test.db")
+	dbPath := filepath.Join(t.TempDir(), storeTestDBFile)
 
 	store, err := Open(ctx, dbPath)
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf(storeTestOpenDB, err)
 	}
 	defer func() { _ = store.Close() }()
 
@@ -183,12 +219,12 @@ func TestStoreDirectoryDedupAndDelete(t *testing.T) {
 	root := testPath("Users", "a")
 	goDir := filepath.Join(root, "projects", "go")
 	entries := []Entry{
-		NewEntryFromPath(root, filepath.Join(goDir, "main.go"), 10, now, false),
+		NewEntryFromPath(root, filepath.Join(goDir, storeTestMainGo), 10, now, false),
 		NewEntryFromPath(root, filepath.Join(goDir, "utils.go"), 12, now, false),
-		NewEntryFromPath(root, filepath.Join(root, "projects", "js", "index.js"), 14, now, false),
+		NewEntryFromPath(root, filepath.Join(root, "projects", "js", storeTestIndexJS), 14, now, false),
 	}
 	if err := store.UpsertBatch(ctx, entries); err != nil {
-		t.Fatalf("upsert: %v", err)
+		t.Fatalf(storeTestUpsert, err)
 	}
 
 	var dirs int
@@ -221,7 +257,7 @@ func TestStoreUpdateDirectorySizesBatch(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "sizes.db"))
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf(storeTestOpenDB, err)
 	}
 	defer func() { _ = store.Close() }()
 
@@ -236,7 +272,7 @@ func TestStoreUpdateDirectorySizesBatch(t *testing.T) {
 		NewEntryFromPath(root, filepath.Join(nested, "two.bin"), 30, time.Now(), false),
 	}
 	if err := store.UpsertBatch(ctx, entries); err != nil {
-		t.Fatalf("upsert: %v", err)
+		t.Fatalf(storeTestUpsert, err)
 	}
 	if err := store.UpdateDirectorySizes(ctx, map[string]int64{root: 42, nested: 42, empty: 0}); err != nil {
 		t.Fatalf("update directory sizes: %v", err)
@@ -250,13 +286,53 @@ func TestStoreUpdateDirectorySizesBatch(t *testing.T) {
 	}
 }
 
+func TestStoreRecalculateDirectorySizesSeparatesSimilarPrefixes(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(t.TempDir(), "recalculate.db"))
+	if err != nil {
+		t.Fatalf(storeTestOpenDB, err)
+	}
+	defer func() { _ = store.Close() }()
+
+	base := testPath("sizes", "root")
+	foo := filepath.Join(base, "foo")
+	nested := filepath.Join(foo, "nested")
+	foobar := filepath.Join(base, "foobar")
+	entries := []Entry{
+		NewEntryFromPath(base, base, 0, time.Now(), true),
+		NewEntryFromPath(base, foo, 0, time.Now(), true),
+		NewEntryFromPath(base, nested, 0, time.Now(), true),
+		NewEntryFromPath(base, foobar, 0, time.Now(), true),
+		NewEntryFromPath(base, filepath.Join(nested, "inside.bin"), 7, time.Now(), false),
+		NewEntryFromPath(base, filepath.Join(foobar, "outside.bin"), 90, time.Now(), false),
+	}
+	if err := store.UpsertBatch(ctx, entries); err != nil {
+		t.Fatalf(storeTestUpsert, err)
+	}
+	if err := store.RecalculateDirectorySizes(ctx, []string{foo, nested}); err != nil {
+		t.Fatalf("recalculate: %v", err)
+	}
+
+	if got := findEntryByPath(t, store, foo, true).Size; got != 7 {
+		t.Fatalf("foo size: want 7, got %d", got)
+	}
+	if got := findEntryByPath(t, store, nested, true).Size; got != 7 {
+		t.Fatalf("nested size: want 7, got %d", got)
+	}
+	if got := findEntryByPath(t, store, foobar, true).Size; got != 0 {
+		t.Fatalf("foobar size changed through similar prefix: want 0, got %d", got)
+	}
+}
+
 func TestStoreTopEntries(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "usage.db"))
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf(storeTestOpenDB, err)
 	}
 	defer func() { _ = store.Close() }()
 
@@ -276,7 +352,7 @@ func TestStoreTopEntries(t *testing.T) {
 		entries = append(entries, NewEntryFromPath(root, filepath.Join(root, fmt.Sprintf("extra-%02d.bin", i)), int64(i), time.Now(), false))
 	}
 	if err := store.UpsertBatch(ctx, entries); err != nil {
-		t.Fatalf("upsert: %v", err)
+		t.Fatalf(storeTestUpsert, err)
 	}
 	if err := store.UpdateDirectorySizes(ctx, map[string]int64{root: 281, large: 80, small: 20, nested: 80}); err != nil {
 		t.Fatalf("update sizes: %v", err)
@@ -300,7 +376,7 @@ func TestStoreWatcherDirectorySizeDeltas(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "watcher-sizes.db"))
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf(storeTestOpenDB, err)
 	}
 	defer func() { _ = store.Close() }()
 
@@ -347,7 +423,7 @@ func TestStoreDirectoryDeleteSubtractsSubtreeSize(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(ctx, filepath.Join(t.TempDir(), "subtree-sizes.db"))
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf(storeTestOpenDB, err)
 	}
 	defer func() { _ = store.Close() }()
 
@@ -363,7 +439,7 @@ func TestStoreDirectoryDeleteSubtractsSubtreeSize(t *testing.T) {
 		NewEntryFromPath(root, filepath.Join(keep, "c.bin"), 5, time.Now(), false),
 	}
 	if err := store.UpsertBatch(ctx, entries); err != nil {
-		t.Fatalf("upsert: %v", err)
+		t.Fatalf(storeTestUpsert, err)
 	}
 	if err := store.UpdateDirectorySizes(ctx, map[string]int64{root: 23, removed: 18, keep: 5}); err != nil {
 		t.Fatalf("initial sizes: %v", err)
@@ -402,25 +478,25 @@ func TestStoreDeleteByPrefixRemovesNestedDescendants(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "test.db")
+	dbPath := filepath.Join(t.TempDir(), storeTestDBFile)
 
 	store, err := Open(ctx, dbPath)
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf(storeTestOpenDB, err)
 	}
 	defer func() { _ = store.Close() }()
 
 	now := time.Now()
 	root := testPath("Users", "a")
 	prefix := filepath.Join(root, "projects", "go")
-	keepPath := filepath.Join(root, "projects", "js", "index.js")
+	keepPath := filepath.Join(root, "projects", "js", storeTestIndexJS)
 	entries := []Entry{
-		NewEntryFromPath(root, filepath.Join(prefix, "pkg", "main.go"), 10, now, false),
+		NewEntryFromPath(root, filepath.Join(prefix, "pkg", storeTestMainGo), 10, now, false),
 		NewEntryFromPath(root, filepath.Join(prefix, "pkg", "readme.md"), 12, now, false),
 		NewEntryFromPath(root, keepPath, 14, now, false),
 	}
 	if err := store.UpsertBatch(ctx, entries); err != nil {
-		t.Fatalf("upsert: %v", err)
+		t.Fatalf(storeTestUpsert, err)
 	}
 
 	if err := store.DeleteByPrefix(ctx, prefix); err != nil {
@@ -448,11 +524,11 @@ func TestStoreFinishScanPrunesMissingAndKeepsProtectedPrefixes(t *testing.T) {
 	t.Parallel()
 
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "test.db")
+	dbPath := filepath.Join(t.TempDir(), storeTestDBFile)
 
 	store, err := Open(ctx, dbPath)
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf(storeTestOpenDB, err)
 	}
 	defer func() { _ = store.Close() }()
 
@@ -463,7 +539,7 @@ func TestStoreFinishScanPrunesMissingAndKeepsProtectedPrefixes(t *testing.T) {
 	stale := NewEntryFromPath(root, filepath.Join(root, "stale.txt"), 10, now, false)
 	protected := NewEntryFromPath(root, filepath.Join(protectedDir, "secret.txt"), 10, now, false)
 	if err := store.UpsertBatch(ctx, []Entry{keep, stale, protected}); err != nil {
-		t.Fatalf("upsert: %v", err)
+		t.Fatalf(storeTestUpsert, err)
 	}
 
 	sessionID, err := store.BeginScan(ctx, []string{root})
@@ -499,13 +575,13 @@ func TestStoreMigratesLegacySchema(t *testing.T) {
 
 	legacySQL, err := sql.Open("sqlite", dbPath)
 	if err != nil {
-		t.Fatalf("open db: %v", err)
+		t.Fatalf(storeTestOpenDB, err)
 	}
 	defer func() { _ = legacySQL.Close() }()
 
 	// Simulate legacy schema with path stored directly in entries and FTS over path+name.
 	root := testPath("Users", "a")
-	fullPath := filepath.Join(root, "projects", "go", "main.go")
+	fullPath := filepath.Join(root, "projects", "go", storeTestMainGo)
 	legacySchema := []string{
 		`DROP TRIGGER IF EXISTS entries_ai;`,
 		`DROP TRIGGER IF EXISTS entries_ad;`,

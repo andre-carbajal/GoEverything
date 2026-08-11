@@ -54,46 +54,7 @@ func NewRootCommand() *cobra.Command {
 			return tui.Run(cmd.Context(), cfg)
 		},
 		PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
-			loaded, err := config.Load()
-			if err != nil {
-				cfgPath, _ := config.Path()
-				return fmt.Errorf("cannot load config at %q: %w\nhint: ensure %s is writable", cfgPath, err, filepath.Dir(cfgPath))
-			}
-			cfg = loaded
-
-			if opt.DBPath == "" {
-				if cfg.DBPath != "" {
-					resolved, resolveErr := config.ExpandPath(cfg.DBPath)
-					if resolveErr != nil {
-						return resolveErr
-					}
-					opt.DBPath = resolved
-				} else {
-					dbPath, dbErr := config.Path()
-					if dbErr != nil {
-						return dbErr
-					}
-					opt.DBPath = filepath.Join(filepath.Dir(dbPath), "goeverything.db")
-				}
-			}
-			if opt.Batch <= 0 {
-				opt.Batch = 2000
-			}
-			if opt.Workers <= 0 {
-				opt.Workers = scanner.DefaultWorkerCount()
-			}
-			if len(opt.Exclude) == 0 {
-				opt.Exclude = cfg.Excludes
-				if len(opt.Exclude) == 0 {
-					opt.Exclude = scanner.DefaultExcludes()
-				}
-			}
-			if err := os.MkdirAll(filepath.Dir(opt.DBPath), 0o755); err != nil {
-				return fmt.Errorf("cannot create db dir %q: %w\nhint: ensure the configured data directory is writable or pass --db", filepath.Dir(opt.DBPath), err)
-			}
-			cfg.DBPath = opt.DBPath
-			cfg.Excludes = opt.Exclude
-			return nil
+			return prepareOptions(&opt, &cfg)
 		},
 	}
 
@@ -107,6 +68,70 @@ func NewRootCommand() *cobra.Command {
 	cmd.AddCommand(newRootsCommand())
 
 	return cmd
+}
+
+func prepareOptions(opt *options, cfg *config.Config) error {
+	if err := loadOptionsConfig(cfg); err != nil {
+		return err
+	}
+	if err := resolveDBPath(opt, *cfg); err != nil {
+		return err
+	}
+	applyOptionDefaults(opt, *cfg)
+	return ensureDBDirectory(opt, cfg)
+}
+
+func loadOptionsConfig(cfg *config.Config) error {
+	loaded, err := config.Load()
+	if err == nil {
+		*cfg = loaded
+		return nil
+	}
+	cfgPath, _ := config.Path()
+	return fmt.Errorf("cannot load config at %q: %w\nhint: ensure %s is writable", cfgPath, err, filepath.Dir(cfgPath))
+}
+
+func resolveDBPath(opt *options, cfg config.Config) error {
+	if opt.DBPath != "" {
+		return nil
+	}
+	if cfg.DBPath != "" {
+		resolved, err := config.ExpandPath(cfg.DBPath)
+		if err != nil {
+			return err
+		}
+		opt.DBPath = resolved
+		return nil
+	}
+	dbPath, err := config.Path()
+	if err != nil {
+		return err
+	}
+	opt.DBPath = filepath.Join(filepath.Dir(dbPath), "goeverything.db")
+	return nil
+}
+
+func applyOptionDefaults(opt *options, cfg config.Config) {
+	if opt.Batch <= 0 {
+		opt.Batch = 2000
+	}
+	if opt.Workers <= 0 {
+		opt.Workers = scanner.DefaultWorkerCount()
+	}
+	if len(opt.Exclude) == 0 {
+		opt.Exclude = cfg.Excludes
+		if len(opt.Exclude) == 0 {
+			opt.Exclude = scanner.DefaultExcludes()
+		}
+	}
+}
+
+func ensureDBDirectory(opt *options, cfg *config.Config) error {
+	if err := os.MkdirAll(filepath.Dir(opt.DBPath), 0o755); err != nil {
+		return fmt.Errorf("cannot create db dir %q: %w\nhint: ensure the configured data directory is writable or pass --db", filepath.Dir(opt.DBPath), err)
+	}
+	cfg.DBPath, cfg.Excludes = opt.DBPath, opt.Exclude
+	return nil
 }
 
 func newScanCommand(opt *options) *cobra.Command {
